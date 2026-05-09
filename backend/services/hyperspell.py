@@ -1,15 +1,27 @@
 """Hyperspell wrapper.
 
-Intentionally thin and resilient — Hyperspell SDK details are documented but
-some method names are flagged [VERIFY] in `docs/hyperspell.md`. This module
-hides those uncertainties behind a stable internal API.
+Locked against `hyperspell` SDK 0.37.x. The SDK surface we use:
 
-Source-name normalization:
-  - Hyperspell:  slack | google_drive | notion | google_mail | github
+  client = Hyperspell(api_key=..., user_id=...)
+  client.integrations.connect(integration_id, redirect_url=...)  -> {url, expires_at}
+  client.integrations.list()                                      -> {integrations: [...]}
+  client.integrations.web_crawler.index(url=..., limit=, ...)     -> WebCrawlerIndexResponse
+  client.connections.list()                                       -> {connections: [{provider, ...}]}
+  client.connections.revoke(connection_id)                        -> {...}
+  client.memories.search(query=..., sources=[...], max_results=K, answer=bool) -> QueryResult
+  client.memories.get(resource_id, source=...)                    -> Memory{type, data, memories, ...}
+  client.memories.add(text=..., title=..., metadata=...)          -> MemoryStatus
+  client.memories.upload(file=..., metadata=str)                  -> MemoryStatus
+  client.memories.status()                                        -> MemoryStatusResponse
+  client.sessions.add(history=..., extract=[...])                 -> MemoryStatus
+
+Source-name normalization (Hyperspell ↔ our DB enum):
+  - Hyperspell:  slack | google_drive | notion | google_mail | github | vault | web_crawler
   - Our DB enum: slack | drive        | notion | gmail       | (github → code_refs only)
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
@@ -25,13 +37,13 @@ HS_TO_DB_SOURCE: dict[str, str] = {
     "google_drive": "drive",
     "notion": "notion",
     "google_mail": "gmail",
-    "gmail": "gmail",  # tolerate either upstream spelling
 }
-DB_TO_HS_SOURCE: dict[str, list[str]] = {
-    "slack": ["slack"],
-    "drive": ["google_drive"],
-    "notion": ["notion"],
-    "gmail": ["google_mail"],
+DB_TO_HS_SOURCE: dict[str, str] = {
+    "slack": "slack",
+    "drive": "google_drive",
+    "notion": "notion",
+    "gmail": "google_mail",
+    "github": "github",
 }
 
 DBSource = Literal["slack", "drive", "notion", "gmail"]
@@ -53,153 +65,411 @@ class HyperspellItem:
 
 # ─── client construction ──────────────────────────────────────────────────────
 def get_client(hyperspell_user_id: str):
-    """Construct a Hyperspell SDK client scoped to a project user.
-
-    The SDK is `pip install hyperspell` (see docs/hyperspell.md). If it's not
-    installed yet, callers should expect ImportError and fall back to fixtures.
-    """
     s = get_settings()
     if not s.hyperspell_key:
         raise RuntimeError("HYPERSPELL_KEY not set.")
-    try:
-        from hyperspell import Hyperspell  # type: ignore
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError(
-            "hyperspell SDK not installed. `pip install hyperspell` and pin in requirements.txt."
-        ) from e
+    from hyperspell import Hyperspell  # imported lazily so unit tests can run without the SDK
     return Hyperspell(api_key=s.hyperspell_key, user_id=hyperspell_user_id)
 
 
-# ─── core operations ──────────────────────────────────────────────────────────
+# ─── integrations directory (provider name → integration UUID) ───────────────
+# Hyperspell's integrations.connect() takes the integration UUID, not the
+# provider string. Live-tested 2026-05-09:
+#   integrations.connect("slack", ...)        → 500 Internal Server Error
+#   integrations.connect("019e0e9d-...", ...) → ✅ returns the OAuth URL
+# So we resolve provider → UUID once per process and cache.
+_provider_uuid_cache: dict[str, str] = {}
+_provider_uuid_cache_loaded_for: str | None = None
+
+
+def _resolve_integration_uuid(client, provider: str) -> str:
+    """Look up the Hyperspell integration UUID for a provider name (e.g. 'slack')."""
+    global _provider_uuid_cache_loaded_for
+    if provider in _provider_uuid_cache:
+        return _provider_uuid_cache[provider]
+
+    # Cache for THIS client's user_id; if user_id changes, re-load (integration
+    # IDs are global but our get_client() builds per-user clients).
+    if _provider_uuid_cache_loaded_for != client.user_id:
+        _provider_uuid_cache.clear()
+        for integ in (client.integrations.list().integrations or []):
+            _provider_uuid_cache[integ.provider] = integ.id
+        _provider_uuid_cache_loaded_for = client.user_id
+
+    if provider not in _provider_uuid_cache:
+        raise RuntimeError(
+            f"Hyperspell has no integration for provider {provider!r}. "
+            f"Available: {sorted(_provider_uuid_cache.keys())}"
+        )
+    return _provider_uuid_cache[provider]
+
+
+# ─── connect URL ──────────────────────────────────────────────────────────────
+def connect_url(
+    hyperspell_user_id: str,
+    db_source: str,
+    *,
+    redirect_url: str | None = None,
+) -> str:
+    """Mint a Hyperspell-hosted OAuth URL for `(user, source)`.
+
+    Translates our DB source enum → Hyperspell provider → integration UUID,
+    then calls `client.integrations.connect(uuid, redirect_url=...)` which
+    returns `{url, expires_at}`. We hand the URL back; the frontend opens it.
+    """
+    provider = DB_TO_HS_SOURCE.get(db_source, db_source)
+    client = get_client(hyperspell_user_id)
+    integration_uuid = _resolve_integration_uuid(client, provider)
+
+    kwargs: dict[str, Any] = {}
+    if redirect_url:
+        kwargs["redirect_url"] = redirect_url
+    resp = client.integrations.connect(integration_uuid, **kwargs)
+    return resp.url
+
+
+# ─── connection status ────────────────────────────────────────────────────────
+def list_connections(hyperspell_user_id: str) -> dict[str, str]:
+    """Per-source connection status: {db_source: 'connected'|'not_connected'}.
+
+    Presence in Hyperspell's `connections.list()` ⇒ connected; revoked ones drop
+    out of the list. We don't fail the request if Hyperspell errors — caller
+    layers a heuristic on top.
+    """
+    try:
+        client = get_client(hyperspell_user_id)
+        resp = client.connections.list()
+    except Exception as e:
+        log.warning("hyperspell.connections.list failed: %s", e)
+        return {}
+
+    connected_db: set[str] = set()
+    for conn in (resp.connections or []):
+        db_src = HS_TO_DB_SOURCE.get(conn.provider)
+        if db_src:
+            connected_db.add(db_src)
+
+    out: dict[str, str] = {}
+    for db_src in HS_TO_DB_SOURCE.values():
+        out[db_src] = "connected" if db_src in connected_db else "not_connected"
+    return out
+
+
+# ─── search + fetch full text ─────────────────────────────────────────────────
 async def search(
     *,
     hyperspell_user_id: str,
     query: str,
-    db_sources: Iterable[DBSource] | None = None,
+    db_sources: Iterable[str] | None = None,
     k: int = 20,
 ) -> list[HyperspellItem]:
-    """Search Hyperspell for a project. Translates DB source names ↔ Hyperspell names.
+    """Search across the requested sources, then fetch full text per hit.
 
-    Returns a list of normalized `HyperspellItem`s safe to UPSERT into project_context.
-    Embedding is computed elsewhere (services/embeddings.py).
+    `memories.search` returns metadata only (title + ID). We fan out
+    `memories.get` calls in parallel to populate `full_text`.
     """
     hs_sources: list[str] = []
     for db_src in (db_sources or []):
-        hs_sources.extend(DB_TO_HS_SOURCE.get(db_src, []))
+        hs = DB_TO_HS_SOURCE.get(db_src)
+        if hs and hs in HS_TO_DB_SOURCE:  # exclude 'github' (handled by code_refs)
+            hs_sources.append(hs)
 
     client = get_client(hyperspell_user_id)
-    # NB: SDK returns a synchronous result. If the SDK exposes async methods,
-    # swap this for `await client.memories.search(...)`.
-    raw = client.memories.search(
-        query=query,
-        sources=hs_sources or None,
-        options={"max_results": k},
-    )
-    return [_normalize(r) for r in _iter_results(raw) if _normalize(r) is not None]  # type: ignore[misc]
 
+    def _do_search() -> list[Any]:
+        kwargs: dict[str, Any] = {"query": query, "max_results": k}
+        if hs_sources:
+            kwargs["sources"] = hs_sources
+        result = client.memories.search(**kwargs)
+        return list(result.documents or [])
 
-def list_connections(hyperspell_user_id: str) -> dict[str, str]:
-    """Return per-source connection status: {db_source: 'connected'|'not_connected'}.
-
-    [VERIFY] Method name on the Hyperspell SDK. Falls back to the empty result
-    if the SDK doesn't expose this — caller should layer a heuristic on top.
-    """
-    try:
-        client = get_client(hyperspell_user_id)
-        raw = getattr(client, "connections", None)
-        if raw is None:
-            return {}
-        items = list(raw.list())
-    except Exception as e:
-        log.warning("hyperspell.list_connections failed: %s", e)
-        return {}
-    out: dict[str, str] = {}
-    for it in items:
-        hs_src = getattr(it, "source", None) or (it.get("source") if isinstance(it, dict) else None)
-        connected = bool(getattr(it, "connected", None) or (it.get("connected") if isinstance(it, dict) else False))
-        db_src = HS_TO_DB_SOURCE.get(hs_src or "")
-        if db_src:
-            out[db_src] = "connected" if connected else "not_connected"
-    return out
-
-
-def connect_url(hyperspell_user_id: str, db_source: DBSource, *, redirect_url: str | None = None) -> str:
-    """Mint a Hyperspell-hosted OAuth URL the user opens to authorize a source.
-
-    [VERIFY] exact SDK / REST method name (`docs.hyperspell.com/usage/connect`).
-    Until verified, returns a generic dashboard link as a passable fallback —
-    the user can finish the connect from there.
-    """
-    hs_sources = DB_TO_HS_SOURCE.get(db_source, [db_source])
-    try:
-        client = get_client(hyperspell_user_id)
-        # Try a few plausible SDK shapes
-        for candidate in ("connect_url", "connections.create", "memories.connect_url"):
-            obj: Any = client
-            ok = True
-            for part in candidate.split("."):
-                obj = getattr(obj, part, None)
-                if obj is None:
-                    ok = False
-                    break
-            if ok and callable(obj):
-                kwargs = {"source": hs_sources[0]}
-                if redirect_url:
-                    kwargs["redirect_url"] = redirect_url
-                url = obj(**kwargs)
-                if isinstance(url, str):
-                    return url
-                if isinstance(url, dict) and "url" in url:
-                    return url["url"]
-    except Exception as e:
-        log.warning("hyperspell.connect_url SDK path failed: %s", e)
-
-    # Fallback: send the user to the Hyperspell dashboard. They can complete
-    # the connect manually and our heuristic in /connect/status will pick it up.
-    return f"https://app.hyperspell.com/connect?source={hs_sources[0]}&user_id={hyperspell_user_id}"
-
-
-# ─── normalization helpers ────────────────────────────────────────────────────
-def _iter_results(raw: Any) -> Iterable[Any]:
-    if raw is None:
+    docs = await asyncio.to_thread(_do_search)
+    if not docs:
         return []
-    if hasattr(raw, "results"):
-        return raw.results or []
-    if isinstance(raw, dict) and "results" in raw:
-        return raw["results"] or []
-    if isinstance(raw, list):
-        return raw
-    return []
+
+    # Fan out body fetches in parallel — `memories.get` is sync, so use a
+    # thread pool. 20 concurrent fetches is fine for a demo.
+    async def _fetch(doc: Any) -> HyperspellItem | None:
+        try:
+            mem = await asyncio.to_thread(
+                client.memories.get,
+                doc.resource_id,
+                source=doc.source,
+            )
+        except Exception as e:
+            log.warning("memories.get failed for %s: %s", doc.resource_id, e)
+            return None
+        return _normalize(doc, mem)
+
+    items = await asyncio.gather(*[_fetch(d) for d in docs])
+    return [it for it in items if it is not None and it.full_text]
 
 
-def _normalize(item: Any) -> HyperspellItem | None:
-    """Best-effort normalization — handles SDK objects or dicts."""
-    def get(obj: Any, *keys: str, default: Any = None) -> Any:
-        for k in keys:
-            if isinstance(obj, dict) and k in obj:
-                return obj[k]
-            v = getattr(obj, k, None)
-            if v is not None:
-                return v
-        return default
-
-    hs_src = get(item, "source", "connector", default="")
-    db_source = HS_TO_DB_SOURCE.get(hs_src)
+# ─── normalization ────────────────────────────────────────────────────────────
+def _normalize(doc: Any, mem: Any) -> HyperspellItem | None:
+    """Combine a search Resource (`doc`) with a fetched Memory (`mem`)."""
+    db_source = HS_TO_DB_SOURCE.get(getattr(doc, "source", "") or "")
     if not db_source:
-        return None  # skip GitHub or unknown sources here; code_refs handles those
+        return None
 
-    full_text: str = get(item, "text", "content", "body", default="") or ""
+    full_text = _extract_text(mem)
     if not full_text:
         return None
 
+    title = getattr(mem, "title", None) or getattr(doc, "title", None)
+    md = getattr(mem, "metadata", None) or getattr(doc, "metadata", None)
+    ref_url = getattr(md, "url", None) if md else None
+    created = getattr(md, "created_at", None) if md else None
+    updated = getattr(md, "last_modified", None) if md else None
+
+    snippet = full_text[:500]
     return HyperspellItem(
         source=db_source,  # type: ignore[arg-type]
-        external_id=get(item, "id", "external_id", "resource_id"),
-        title=get(item, "title", "subject", "name"),
-        snippet=(get(item, "snippet") or full_text[:500]),
+        external_id=getattr(doc, "resource_id", None),
+        title=title,
+        snippet=snippet,
         full_text=full_text,
-        author=get(item, "author", "from", "user"),
-        ref_url=get(item, "url", "href", "ref_url"),
-        source_created_at=get(item, "created_at", "createdAt"),
-        source_updated_at=get(item, "updated_at", "updatedAt"),
+        author=None,  # Hyperspell doesn't surface a uniform author field on Memory
+        ref_url=ref_url,
+        source_created_at=created.isoformat() if hasattr(created, "isoformat") else created,
+        source_updated_at=updated.isoformat() if hasattr(updated, "isoformat") else updated,
     )
+
+
+def _extract_text(mem: Any) -> str:
+    """Pull a textual representation out of a Memory.
+
+    `Memory.memories: List[str]` is the chunked text view; `Memory.data` is the
+    structured payload (varies by source — message lists, file content, etc.).
+    Concatenate `memories` first; fall back to `data` stringified.
+    """
+    parts: list[str] = []
+    memories = getattr(mem, "memories", None) or []
+    for m in memories:
+        if isinstance(m, str) and m.strip():
+            parts.append(m.strip())
+    if parts:
+        return "\n\n".join(parts)
+
+    data = getattr(mem, "data", None) or []
+    for d in data:
+        if isinstance(d, str) and d.strip():
+            parts.append(d.strip())
+        elif isinstance(d, dict):
+            # Best-effort: pull common text fields out of dict-shaped data.
+            for key in ("text", "content", "body", "message", "value"):
+                v = d.get(key)
+                if isinstance(v, str) and v.strip():
+                    parts.append(v.strip())
+                    break
+    return "\n\n".join(parts)
+
+
+# ─── search-with-answer (richer return for /search) ───────────────────────────
+@dataclass
+class SearchHit:
+    source: str            # raw Hyperspell source name (e.g. "google_drive", "vault")
+    resource_id: str
+    title: str | None
+    score: float | None
+    ref_url: str | None
+
+
+@dataclass
+class SearchResult:
+    answer: str | None
+    query_id: str | None
+    hits: list[SearchHit]
+
+
+async def search_with_answer(
+    *,
+    hyperspell_user_id: str,
+    query: str,
+    hs_sources: list[str] | None = None,
+    answer: bool = False,
+    max_results: int = 10,
+) -> SearchResult:
+    """Thin wrapper over `memories.search` that preserves answer + score + URL.
+
+    Unlike `search()` above, this does NOT fan out `memories.get` per hit. It's
+    for the live `/search` endpoint where we want ranking + (optionally) an
+    LLM-synthesized answer, not full chunk text.
+    """
+    client = get_client(hyperspell_user_id)
+
+    def _do() -> Any:
+        kwargs: dict[str, Any] = {"query": query, "max_results": max_results}
+        if hs_sources:
+            kwargs["sources"] = hs_sources
+        if answer:
+            kwargs["answer"] = True
+        return client.memories.search(**kwargs)
+
+    res = await asyncio.to_thread(_do)
+    hits: list[SearchHit] = []
+    for d in (res.documents or []):
+        md = getattr(d, "metadata", None)
+        hits.append(
+            SearchHit(
+                source=getattr(d, "source", "") or "",
+                resource_id=getattr(d, "resource_id", "") or "",
+                title=getattr(d, "title", None),
+                score=getattr(d, "score", None),
+                ref_url=getattr(md, "url", None) if md else None,
+            )
+        )
+    return SearchResult(
+        answer=getattr(res, "answer", None),
+        query_id=getattr(res, "query_id", None),
+        hits=hits,
+    )
+
+
+# ─── memories.add / upload / status ───────────────────────────────────────────
+async def memory_add(
+    *,
+    hyperspell_user_id: str,
+    text: str,
+    title: str | None = None,
+    collection: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Push arbitrary text into Hyperspell vault. Returns {resource_id, source, status}."""
+    client = get_client(hyperspell_user_id)
+
+    def _do() -> Any:
+        kwargs: dict[str, Any] = {"text": text}
+        if title:
+            kwargs["title"] = title
+        if collection:
+            kwargs["collection"] = collection
+        if metadata:
+            kwargs["metadata"] = metadata
+        return client.memories.add(**kwargs)
+
+    status = await asyncio.to_thread(_do)
+    return _serialize_status(status)
+
+
+async def memory_upload(
+    *,
+    hyperspell_user_id: str,
+    filename: str,
+    content: bytes,
+    content_type: str | None = None,
+    collection: str | None = None,
+    metadata: str | None = None,
+) -> dict[str, Any]:
+    """Upload a file to Hyperspell. `metadata` must be a JSON-encoded string per SDK."""
+    client = get_client(hyperspell_user_id)
+    file_tuple = (filename, content, content_type or "application/octet-stream")
+
+    def _do() -> Any:
+        kwargs: dict[str, Any] = {"file": file_tuple}
+        if collection:
+            kwargs["collection"] = collection
+        if metadata:
+            kwargs["metadata"] = metadata
+        return client.memories.upload(**kwargs)
+
+    status = await asyncio.to_thread(_do)
+    return _serialize_status(status)
+
+
+async def memory_status(hyperspell_user_id: str) -> dict[str, Any]:
+    """Per-provider indexing progress."""
+    client = get_client(hyperspell_user_id)
+    res = await asyncio.to_thread(client.memories.status)
+    return res.model_dump() if hasattr(res, "model_dump") else dict(res)
+
+
+# ─── web crawler ──────────────────────────────────────────────────────────────
+async def web_crawl(
+    *,
+    hyperspell_user_id: str,
+    url: str,
+    limit: int | None = None,
+    max_depth: int | None = None,
+) -> dict[str, Any]:
+    """Kick off a recursive crawl of `url`. Pages become searchable under source=web_crawler."""
+    client = get_client(hyperspell_user_id)
+
+    def _do() -> Any:
+        kwargs: dict[str, Any] = {"url": url}
+        if limit is not None:
+            kwargs["limit"] = limit
+        if max_depth is not None:
+            kwargs["max_depth"] = max_depth
+        return client.integrations.web_crawler.index(**kwargs)
+
+    res = await asyncio.to_thread(_do)
+    return res.model_dump() if hasattr(res, "model_dump") else dict(res)
+
+
+# ─── sessions (agent traces / meeting transcripts) ────────────────────────────
+async def session_add(
+    *,
+    hyperspell_user_id: str,
+    history: str,
+    title: str | None = None,
+    extract: list[str] | None = None,
+    session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Push a conversation transcript to Hyperspell.
+
+    `extract` controls what Hyperspell pulls out: any subset of
+    {"procedure","memory","mood"}.
+    """
+    client = get_client(hyperspell_user_id)
+
+    def _do() -> Any:
+        kwargs: dict[str, Any] = {"history": history}
+        if title:
+            kwargs["title"] = title
+        if extract:
+            kwargs["extract"] = extract
+        if session_id:
+            kwargs["session_id"] = session_id
+        if metadata:
+            kwargs["metadata"] = metadata
+        return client.sessions.add(**kwargs)
+
+    status = await asyncio.to_thread(_do)
+    return _serialize_status(status)
+
+
+# ─── integrations + connections (admin) ───────────────────────────────────────
+async def list_integrations(hyperspell_user_id: str) -> dict[str, Any]:
+    """All integrations Hyperspell exposes for this user (connected and not)."""
+    client = get_client(hyperspell_user_id)
+    res = await asyncio.to_thread(client.integrations.list)
+    return res.model_dump() if hasattr(res, "model_dump") else dict(res)
+
+
+async def revoke_connection(*, hyperspell_user_id: str, connection_id: str) -> dict[str, Any]:
+    """Revoke a connection by its Hyperspell ID. Deletes credentials + indexed data."""
+    client = get_client(hyperspell_user_id)
+    res = await asyncio.to_thread(client.connections.revoke, connection_id)
+    return res.model_dump() if hasattr(res, "model_dump") else dict(res)
+
+
+async def find_connection_id_for_provider(
+    *, hyperspell_user_id: str, hs_provider: str
+) -> str | None:
+    """Look up the connection_id for a provider so callers can revoke by source name."""
+    client = get_client(hyperspell_user_id)
+    res = await asyncio.to_thread(client.connections.list)
+    for conn in (res.connections or []):
+        if conn.provider == hs_provider:
+            return conn.id
+    return None
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+def _serialize_status(status: Any) -> dict[str, Any]:
+    """MemoryStatus → JSON-safe dict."""
+    if hasattr(status, "model_dump"):
+        return status.model_dump(mode="json")
+    return dict(status)
