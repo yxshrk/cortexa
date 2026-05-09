@@ -45,7 +45,11 @@ pip install fastapi uvicorn httpx pydantic supabase \
             apscheduler anthropic openai python-dotenv
 ```
 
-Then create `.env` with: `OPENAI_KEY`, `ANTHROPIC_KEY`, `HYPERSPELL_KEY`, `LINEAR_TOKEN`, `GITHUB_TOKEN`, `DEVIN_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DEMO_TOKEN`.
+Then `cp .env.example .env` and fill in. See [`.env.example`](./.env.example) for the full list (Supabase, OpenAI, Anthropic, Hyperspell, Linear, GitHub, Devin, DEMO_TOKEN).
+
+**Supabase credentials specifically** (the two you need to start):
+- `SUPABASE_URL` — from Supabase dashboard → Project Settings → API → Project URL.
+- `SUPABASE_SERVICE_ROLE_KEY` — same page, the **service_role** secret (NOT the anon key). Bypasses RLS so backend can write any table. Never expose to frontend.
 
 Run: `uvicorn main:app --reload`.
 
