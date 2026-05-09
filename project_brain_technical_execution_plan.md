@@ -9,31 +9,23 @@
 
 ## 0. The Big Idea (30-second mental model)
 
-The product centers on **one artifact**: a per-project, **timestamped weekly knowledge document**. Three things write to it. One thing reads from it.
+The product centers on **one artifact per project**: a timestamped **weekly knowledge document**. Three writers append to it. One reader runs over it.
 
 ```
-                        WRITE → ─┐
-   ┌─────────────────────────┐   │
-   │ Voice agent joins        │   │
-   │ meetings → notes         │   │      ┌────────────────────────────┐
-   └─────────────────────────┘   ├────► │  WEEKLY KNOWLEDGE DOC      │
-                                 │      │  (timestamped log,         │
-   ┌─────────────────────────┐   │      │   one per project)         │
-   │ Hyperspell pulls Slack/  │   │      │                            │
-   │ Drive/Notion/GitHub     │  ─┤      └──────────────┬─────────────┘
-   └─────────────────────────┘                         │
-                                                       │ READ
-                                                       ▼
-                                       ┌────────────────────────────┐
-                                       │  Categorizer (Claude)      │
-                                       │  → bugs / features /       │
-                                       │    improvements            │
-                                       │  → executable drafts       │
-                                       │    (Linear / PR / Devin)   │
-                                       └────────────────────────────┘
+  WRITERS ─────────────────────────────────────►  ONE DOC ─►  READER
+  ────────                                        ────────    ──────
+  • Voice Agent (live meetings)            ┌──────────────┐
+  • Hyperspell ingestion (Slack/Drive/    │  knowledge_  │   Claude
+    Notion/GitHub) — manual + cron         │  entries     │   ──►
+  • (optional: manual notes)               │  per project │   bugs /
+                                           │  per week    │   features /
+                                           └──────────────┘   improvements
+                                                              │
+                                                              ▼
+                                                    Linear / PR / Devin drafts
 ```
 
-That is the entire system. Everything below is how each of us builds our slice.
+That's the entire system.
 
 ---
 
@@ -41,476 +33,467 @@ That is the entire system. Everything below is how each of us builds our slice.
 
 | Layer | Tech | Sponsor | Owner |
 |---|---|---|---|
-| Static + code context | **Hyperspell** (Slack / Drive / Notion / GitHub) | ✅ track | Yash |
+| Static + code context | **Hyperspell** (Slack/Drive/Notion/GitHub) | ✅ track | Yash |
 | Live meeting capture | **OpenAI Realtime API** (WebRTC) | ✅ | Yudong |
-| Database + realtime | **Supabase** (Postgres + Realtime + Auth) | — | Jin (with Yash) |
-| Frontend | **Next.js (App Router)** on **Vercel** | ✅ | Jin |
-| Backend orchestration | **FastAPI** (Python) | — | Yash |
+| Database + realtime | **Supabase** (Postgres + Realtime + RLS) | — | Jin (with Yash) |
+| Frontend | **Next.js** (App Router) on **Vercel** | ✅ | Jin (page) + Yudong (voice agent) |
+| Backend orchestration | **FastAPI** (Python) + APScheduler | — | Yash |
 | Categorizer LLM | **Claude Sonnet 4.6** (Anthropic) | — | Yash |
+| Voice summarizer | **GPT-4.1** (Next.js route handler) | — | Yudong |
 | Executors | Linear · GitHub · **Devin** | ✅ Devin | Yash |
 
-**Sponsors visible in the demo**: Hyperspell · OpenAI · Vercel · Devin = 4 (Supabase is not a sponsor — chosen for velocity over Convex).
+**Sponsors visible**: Hyperspell · OpenAI · Vercel · Devin = 4. *(Stretch: swap APScheduler → Tensorlake to add a 5th.)*
 
 ---
 
-## 2. Architecture (with role ownership)
+## 2. Architecture (one diagram, with role ownership)
 
 ```
-┌────────────────────────── BROWSER (Vercel) ──────────────────────────┐
-│                                                                       │
-│   ┌────────────────────────┐   ┌──────────────────────────────────┐  │
-│   │  Voice Agent component │   │  3-panel project page            │  │
-│   │  (mic, WebRTC client)  │   │  • Weekly Knowledge Doc (left)   │  │
-│   │     ─── YUDONG ───      │   │  • Categorized Plan (middle)     │  │
-│   └──────────┬─────────────┘   │  • Generated Actions (right)     │  │
-│              │                 │     ─── JIN ───                  │  │
-│              │                 └──────────────────┬───────────────┘  │
-└──────────────┼────────────────────────────────────┼──────────────────┘
-               │ WebRTC (audio + DC)                │ Supabase realtime
-               ▼                                    ▼
-   ┌──────────────────────┐                 ┌─────────────────────────┐
-   │   OpenAI Realtime    │                 │   Supabase              │
-   │   gpt-realtime-      │                 │   • knowledge_entries   │
-   │   whisper            │                 │   • categorized_items   │
-   │     ─── YUDONG ───    │                 │   • generated_actions   │
-   └──────────────────────┘                 │      ─── JIN (+Yash) ───  │
-               │                            └─────────────▲───────────┘
-               │ transcript deltas                        │
-               ▼                                          │
-   ┌─────────────────────────────────────────────────────┴──────────┐
-   │                FastAPI ─── YASH ───                             │
-   │                                                                 │
-   │   POST /voice/append          ◄── Yudong (per chunk)            │
-   │       └─► insert knowledge_entries (source='voice')             │
-   │                                                                 │
-   │   POST /ingest/hyperspell     ◄── Jin button or scheduled       │
-   │       └─► hyperspell.search → insert knowledge_entries          │
-   │                                                                 │
-   │   POST /categorize            ◄── Jin button                    │
-   │       └─► Claude over weekly doc → insert categorized_items     │
-   │              and generated_actions                              │
-   │                                                                 │
-   │   POST /actions/{id}/execute  ◄── Jin button                    │
-   │       └─► Linear / GitHub / Devin → update external_url         │
-   │                                                                 │
-   │   POST /rt/token              ◄── Yudong's voice agent          │
-   │       └─► mint OpenAI ephemeral token                           │
-   └─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼─────────────────┐
-              ▼               ▼                 ▼
-     ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐
-     │  Hyperspell  │  │   Claude     │  │  Linear API     │
-     │  Slack/Drive │  │  Sonnet 4.6  │  │  GitHub API     │
-     │  Notion/GH   │  │              │  │  Devin API      │
-     └──────────────┘  └──────────────┘  └─────────────────┘
+┌─── BROWSER (Next.js on Vercel) ─────────────────────────────────────────┐
+│                                                                          │
+│   /projects ──► /projects/[id]                                           │
+│                                                                          │
+│   ┌─ Project page ────────────────────────────────────────────────────┐  │
+│   │   Tabs:   📚 Knowledge  |  💡 Insights  |  ⚡ Actions               │  │
+│   │   ──────────────────────────────────────────────────────────────  │  │
+│   │                                                                    │  │
+│   │   📚 Knowledge tab                                                 │  │
+│   │     ┌─── <VoiceAgent /> ── YUDONG ─────────────────────────┐      │  │
+│   │     │ • Briefing panel (from Yash's /context/briefing)     │      │  │
+│   │     │ • mic + tab-audio mixer (getDisplayMedia + mic)      │      │  │
+│   │     │ • WebRTC ◄────────► OpenAI Realtime                  │──────┼──► OpenAI
+│   │     │ • POST /api/voice/summarize (Yudong's Next route)    │      │  │  Realtime
+│   │     │ • INSERT knowledge_entries via supabase-js (anon)    │      │  │
+│   │     └──────────────────────────────────────────────────────┘      │  │
+│   │     <WeeklyDoc /> ── JIN ── auto-updates via realtime            │  │
+│   │                                                                    │  │
+│   │   💡 Insights tab  ── JIN ── cards from categorized_items         │  │
+│   │   ⚡ Actions tab   ── JIN ── cards from generated_actions          │  │
+│   │                                  + Execute button per card        │  │
+│   └────────────────────────────────────────────────────────────────────┘  │
+└──────────┬────────────────────────────────────────────┬──────────────────┘
+           │ supabase-js (anon key)                     │ fetch HTTP
+           │ • Jin: realtime SELECT subscriptions       │ • Yudong → /context/briefing,
+           │   on knowledge_entries / categorized_items │              /rt/token
+           │   / generated_actions                      │ • Jin    → /ingest/hyperspell,
+           │ • Yudong: INSERT knowledge_entries         │              /categorize,
+           │   (only)                                   │              /actions/{id}/execute
+           ▼                                            ▼
+┌──── SUPABASE ── JIN ─────┐         ┌──── FASTAPI ── YASH ─────────────────┐
+│                          │         │                                       │
+│  projects                │         │  GET  /context/briefing               │
+│  meetings                │         │  POST /rt/token                       │
+│  knowledge_entries       │◄────────┤  POST /ingest/hyperspell              │
+│  categorized_items       │  py     │  POST /categorize                     │
+│  generated_actions       │  client │  POST /actions/{id}/execute           │
+│                          │ (svc)   │                                       │
+│  realtime publication +  │         │  APScheduler:                         │
+│  RLS policies (§6)       │         │    /ingest/hyperspell every 5min      │
+│                          │         │                                       │
+│                          │         │  External: Hyperspell · OpenAI ·      │
+│                          │         │            Anthropic · Linear ·       │
+│                          │         │            GitHub · Devin             │
+└──────────────────────────┘         └───────────────────────────────────────┘
 ```
 
-The dotted boundaries are role ownership. Anything inside a person's box is theirs. Anything across a boundary is a contract (§5).
+**Read this top to bottom**: browser at the top, two backends at the bottom (Supabase for state, FastAPI for orchestration). Two write paths into Supabase: Yudong from the browser via anon key (only on `knowledge_entries`); Yash from FastAPI via service-role key (any table). Reads are all realtime subscriptions from Jin's panels.
 
 ---
 
 ## 3. The Three Roles
 
-### 🎙️ Yudong — Voice Agent
+### 🎙️ Yudong — Voice Agent (fully self-contained)
 
-**Your slice of the flow**
+You own the **entire** voice path. No round-trips to Yash's backend for writes. Yash's only contribution to your slice is `/rt/token` (mints OpenAI ephemeral tokens) and `/context/briefing` (assembles your briefing from sources he already has wired). Everything else lives in your frontend.
+
+**Your slice**
 
 ```
-   Meeting audio                         Project briefing
-   (tab + mic mixed)                     (last week + latest docs)
-        │                                       │
-        ▼                                       ▼
-   ┌──────────────────────────────┐    GET /context/briefing
-   │  VoiceAgent.tsx              │◄────── (Yash's endpoint)
-   │  • captures audio            │
-   │  • shows briefing on screen  │
-   │  • opens WebRTC to Realtime  │
-   └──────────────┬───────────────┘
-                  │ WebRTC
-                  ▼
-         OpenAI Realtime (gpt-realtime-whisper)
-                  │ transcript deltas
-                  ▼
-         buffer ~20s → POST /voice/append { ..., briefing_id }
-                  │
-                  ▼ (Yash's summarizer uses briefing as system prompt)
-         knowledge_entries (source='voice', structured)
-                  │
-                  ▼
-         Jin's UI lights up
+On meeting start:
+   GET  /context/briefing?projectId=X     ──► render Briefing panel
+   POST /rt/token                          ──► WebRTC handshake with OpenAI Realtime
+   captureMeetingAudio()                   ──► tab + mic mixed stream
+
+While running:
+   transcript deltas from Realtime data channel
+       │
+       ▼ (every ~20s, on speaker pause)
+   POST /api/voice/summarize  (your own Next.js route handler)
+       body: { transcript_chunk, briefing }
+       → returns: [{ type, text, refs_to }]
+       │
+       ▼
+   for each note:
+     supabase.from("knowledge_entries").insert({...})  ─── anon key
+       │
+       ▼
+   Supabase realtime broadcasts INSERT
+       │
+       ▼
+   Jin's Knowledge tab re-renders with the new note (~200ms)
 ```
 
-**Two things to nail**
+#### A. Joining meetings (3 patterns)
 
-A. **The agent has to *join* the meeting** — not just listen to a single mic.
-B. **The agent has to be grounded in the project** — so notes come out structured and project-aware, not generic.
-
-#### A. How the agent joins meetings
-
-Three patterns, easiest first. Pick A1 for the demo; A2 is your fallback.
-
-**A1 — Tab audio + mic mix (recommended).** Browser captures the audio of any open meeting tab (Zoom Web, Google Meet, Teams Web) plus the local mic, mixes them, and pipes one combined stream into the WebRTC peer connection. No external dependencies. Demo-legible: "I have a Meet tab open, the agent is in the call."
+**A1 — Tab + mic mix (recommended).** `getDisplayMedia({audio:true})` captures any open Zoom/Meet/Teams tab; `getUserMedia({audio:true})` captures local mic; mix via Web Audio.
 
 ```ts
 // frontend/lib/meetingAudio.ts
 export async function captureMeetingAudio(): Promise<MediaStream> {
-  // 1) capture the meeting tab's audio (Zoom Web / Google Meet / Teams Web)
-  //    browser prompts user to pick a tab + tick "Share tab audio"
-  const tab = await navigator.mediaDevices.getDisplayMedia({
-    audio: true,
-    video: false,
-  });
-  // 2) capture local mic
+  const tab = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false });
   const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-  // 3) mix both into one stream via Web Audio
   const ctx = new AudioContext();
   const dest = ctx.createMediaStreamDestination();
   ctx.createMediaStreamSource(tab).connect(dest);
   ctx.createMediaStreamSource(mic).connect(dest);
-  return dest.stream; // pipe into RTCPeerConnection.addTrack()
+  return dest.stream;
 }
 ```
 
-UI flow: button reads **🎙️ Join meeting** → click triggers the OS share-screen prompt → user picks their Meet/Zoom tab and ticks *"Share tab audio"* → the agent is now hearing both sides of the call.
+UI: button **🎙️ Join meeting** → OS share-screen prompt → user picks the meeting tab and ticks "Share tab audio" → agent is in the call.
 
-**A2 — Mic only (fallback).** Just `getUserMedia({ audio: true })`. Works if the meeting is in person, on speakerphone, or if A1's permissions get weird on event Wi-Fi.
+**A2 — Mic only.** `getUserMedia` only. Use if A1 has permission issues on event Wi-Fi.
 
-**A3 — Recall.ai bot (skip for today).** A real meeting bot that joins Zoom/Meet/Teams as a participant via Recall's API. ~30 min wiring; only worth it if A1 and A2 both fail. Not a Nozomio sponsor — adds dependency without prize value.
+**A3 — Recall.ai bot.** Skip for today.
 
-**Demo-day fallback**: pre-recorded standup audio played through laptop speakers; agent runs A2 against the local mic.
+**Demo fallback**: pre-recorded standup audio played through laptop speakers + A2.
 
-#### B. Pulling project context (the briefing pattern)
+#### B. The briefing pattern (project context for the agent)
 
-The Realtime API itself just transcribes — it doesn't know your project. To produce a *structured, project-aware document* from the meeting, the agent fetches a **briefing** before the meeting starts and passes the briefing's id with every transcript chunk so Yash's summarizer uses it as the system prompt.
+Before the meeting, fetch a briefing from Yash. Render it in the agent's left rail (proves grounding to judges). Pass it to your summarizer route as the system prompt.
 
-```
-on mount:
-   GET /context/briefing?projectId=X   ── Yash assembles this from:
-                                         • last 7 days of knowledge_entries
-                                         • Hyperspell: latest 3 design docs
-                                         • Hyperspell: latest 5 GitHub commits
-                                         • cached 1-paragraph project summary
-
-   response: {
-     id, project_summary,
-     recent_decisions[], open_threads[],
-     latest_docs[], active_files[], people[]
-   }
-
-every chunk:
-   POST /voice/append { projectId, meetingId, raw_transcript,
-                        briefing_id, ts }
-   └─► Yash's summarizer uses briefing_id as system prompt
-       → returns structured notes:
-         { type: "decision|action_item|blocker|mention|fyi",
-           text, refs_to: [files|people|threads from briefing] }
-       → inserted into knowledge_entries
+```ts
+// inside VoiceAgent.tsx
+const briefing = await fetch(`${FASTAPI}/context/briefing?projectId=${pid}`).then(r=>r.json());
+// renders as: themes, open threads, latest docs, active files, people
 ```
 
-What you render in the agent's left rail during the meeting (proves to judges that the agent is grounded):
-
-```
-📋 Briefing loaded — 14 sources
-
-Last week's themes
-  • Safari login regression
-  • CSV export v2 design review
-  • Rate-limit middleware refactor
-
-Open threads
-  • Slack #bugs · 6 messages
-  • Notion: Q2 plan — 3 overdue items
-
-Active files (last 7d)
-  • src/auth/redirect.ts
-  • src/middleware/rateLimit.ts
-
-People
-  • yash, jin, yudong
-```
-
-**Why this is the right shape**: the briefing is generated server-side from sources Yash already has wired (Hyperspell + knowledge_entries). You don't have to do any retrieval yourself. You just GET the briefing and pass its id along — the smarts live in Yash's prompt.
-
-**Optional: bias the Realtime session itself.** If you have time, send a `session.update` event over the WebRTC data channel after connect, with `instructions` set to a short version of the briefing. This makes the Realtime model's transcription bias toward project terms (e.g. recognize *"rate-limit middleware"* as one phrase, your filenames spelled correctly). Code:
+**Optional bias**: send `session.update` to Realtime so it transcribes project-specific terms accurately (filenames, acronyms):
 ```ts
 dc.send(JSON.stringify({
   type: "session.update",
   session: {
-    instructions: `You are transcribing a standup for project ${name}.
-    Recent themes: ${themes.join(", ")}. Active files: ${files.join(", ")}.`,
+    instructions: `Transcribing standup for ${name}. Themes: ${themes.join(", ")}. Files: ${files.join(", ")}.`,
     input_audio_transcription: { model: "gpt-realtime-whisper" },
   },
 }));
 ```
 
-#### What you build (final task list)
+#### C. The summarizer route (Yudong owns this entirely)
 
-1. **`frontend/lib/meetingAudio.ts`** — the tab+mic mixer (A1).
-2. **`frontend/lib/realtime.ts`** — WebRTC handshake helper.
-3. **`frontend/components/VoiceAgent.tsx`** — the agent UI:
-   - On mount: `GET /context/briefing?projectId=X` → renders briefing panel.
-   - On **🎙️ Join meeting** click: `captureMeetingAudio()` → opens WebRTC with `/rt/token` → optionally sends `session.update` with briefing themes.
-   - Buffers transcript deltas; every 20s POSTs `/voice/append` with `{ projectId, meetingId, raw_transcript, briefing_id, ts }`.
-   - On **■ End meeting**: flush buffer, close peer connection.
-4. **`frontend/components/BriefingPanel.tsx`** — small component rendering the briefing.
-5. **`demo/standup_script.md`** — the 60-second standup script.
-6. **(Bonus, only if done by 4pm)** `frontend/components/MeetingCanvas.tsx` — extract entities from each note, render as nodes on a canvas. Skip if time-constrained.
+```ts
+// frontend/app/api/voice/summarize/route.ts
+import OpenAI from "openai";
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export async function POST(req: Request) {
+  const { transcript_chunk, briefing } = await req.json();
+  const r = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    response_format: { type: "json_schema", json_schema: VoiceNoteSchema },
+    messages: [
+      { role: "system", content: `You take meeting transcript chunks and emit 1-3 structured notes.
+        Project context: ${briefing.project_summary}
+        Recent themes: ${briefing.themes.join(", ")}
+        Active files: ${briefing.active_files.map(f=>f.path).join(", ")}
+        Each note: { type: "decision|action_item|blocker|mention|fyi", text, refs_to: [...] }` },
+      { role: "user", content: transcript_chunk },
+    ],
+  });
+  return Response.json(JSON.parse(r.choices[0].message.content));
+}
+```
+
+Then in your component:
+```ts
+const notes = await fetch("/api/voice/summarize", { method: "POST",
+  body: JSON.stringify({ transcript_chunk, briefing }) }).then(r=>r.json());
+for (const note of notes) {
+  await supabase.from("knowledge_entries").insert({
+    project_id: pid, meeting_id: mid, source: "voice",
+    author: "voice_agent", content: note.text, metadata: note,
+  });
+}
+```
+
+#### What you build
+
+| File | Purpose |
+|---|---|
+| `frontend/lib/meetingAudio.ts` | tab + mic mixer |
+| `frontend/lib/realtime.ts` | WebRTC handshake helper |
+| `frontend/lib/voiceNoteSchema.ts` | shared JSON schema for the route |
+| `frontend/app/api/voice/summarize/route.ts` | the summarizer endpoint |
+| `frontend/components/VoiceAgent.tsx` | the component Jin mounts |
+| `frontend/components/BriefingPanel.tsx` | the briefing display |
+| `demo/standup_script.md` | 60-second standup script |
 
 #### Milestones
 
-- 11:00am — VoiceAgent skeleton: `/rt/token` + mic-only WebRTC. Deltas in console.
-- 12:30pm — Tab-audio capture working (`getDisplayMedia` + mic mixed via Web Audio).
-- 1:30pm — `/context/briefing` integrated; briefing panel renders real items from Yash's endpoint.
-- 2:30pm — Chunks flushing to `/voice/append` with `briefing_id`; structured voice notes appear in Jin's Weekly Doc panel.
-- 4:00pm — Optional `session.update` bias landed (or skipped).
+- 11:00am — VoiceAgent skeleton: `/rt/token` + mic-only WebRTC; deltas in console.
+- 12:30pm — Tab+mic mixer working; `/api/voice/summarize` route returns structured notes from a hardcoded chunk.
+- 1:30pm — Briefing fetched and rendered; passed to summarizer.
+- 2:30pm — Notes flowing end-to-end: mic → Realtime → summarizer → Supabase → Jin's Knowledge tab.
 - 5:00pm — Demo timed at ≤90s, run cleanly twice.
-
-#### Files you own
-
-- `frontend/lib/meetingAudio.ts`, `frontend/lib/realtime.ts`
-- `frontend/components/VoiceAgent.tsx`, `frontend/components/BriefingPanel.tsx`
-- `demo/standup_script.md`
 
 ---
 
 ### 🗄️ Jin — Database & Frontend
 
-**Your slice of the flow**
+Two artifacts: the Supabase schema/realtime config, and a tabbed Next.js app.
+
+**Information architecture**
 
 ```
-Yash's FastAPI ──supabase-py──► Supabase Postgres ──realtime──► Next.js UI
-                                       ▲                              │
-                                       │ Yudong's voice agent         │
-                                       │ (via Yash's /voice/append)   │
-                                       └──────────────────────────────┘
-                                                                      │
-                                                                      ▼
-                                                       Three reactive panels
+/projects                            (project list)
+   │ click
+   ▼
+/projects/[id]                       (project page with tabs)
+   │
+   ├─ 📚 Knowledge tab
+   │     • <VoiceAgent />  (mounted from Yudong's component)
+   │     • <WeeklyDoc /> — list of knowledge_entries (last 7d, asc)
+   │       grouped by day, with source-icon chips (🎙️ 💬 📄 🐙)
+   │
+   ├─ 💡 Insights tab
+   │     Three sub-sections: Bugs / Features / Improvements
+   │     Each card: title · description · source chips · code chips · next step
+   │
+   └─ ⚡ Actions tab
+         Tabs within tabs (or filters): Linear / PR / Devin
+         Each card has an "Execute" button → POST /actions/{id}/execute
+         On success, status flips to executed and external link appears
 ```
+
+**How updates propagate** (the demo magic)
+
+Every write to Supabase triggers a `postgres_changes` event. Each tab subscribes to its own slice:
+
+| Tab | Subscribes to | Triggered by |
+|---|---|---|
+| 📚 Knowledge | `knowledge_entries` (filter `project_id`) | Yudong's voice notes (anon INSERT), Yash's `/ingest/hyperspell` (svc INSERT, manual + 5min cron) |
+| 💡 Insights | `categorized_items` | Yash's `/categorize` |
+| ⚡ Actions   | `generated_actions` | Yash's `/categorize` (creates drafts) and `/actions/{id}/execute` (status update) |
+
+You write zero polling code. Set up the channels once; React state flows from there.
 
 **What you build**
 
-1. **Supabase project** (§7 has the SQL). Create the project, run schema, enable Realtime on the three reactive tables, disable RLS for the day. Hand keys out:
-   - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` → goes in Vercel env + your `.env.local`.
-   - `SUPABASE_SERVICE_ROLE_KEY` → hand to Yash only (his backend bypasses RLS with this).
+| File | Purpose |
+|---|---|
+| `supabase/schema.sql` | source of truth; pre-day pair work with Yash |
+| `supabase/migrations/*.sql` | mid-day diffs (Yash adds, you apply) |
+| `frontend/app/projects/page.tsx` | project list |
+| `frontend/app/projects/[id]/page.tsx` | tab shell (uses React state or `searchParams` for active tab) |
+| `frontend/app/projects/[id]/_tabs/KnowledgeTab.tsx` | mounts `<VoiceAgent>` + `<WeeklyDoc>` |
+| `frontend/app/projects/[id]/_tabs/InsightsTab.tsx` | reads `categorized_items` via realtime |
+| `frontend/app/projects/[id]/_tabs/ActionsTab.tsx` | reads `generated_actions`, Execute button |
+| `frontend/components/{WeeklyDoc, BugCard, FeatureCard, ImprovementCard, ActionCard}.tsx` | render primitives |
+| `frontend/lib/supabase.ts` | client + helper subscriptions |
+| `frontend/app/globals.css`, Tailwind config | styling |
 
-2. **Next.js page at `/project/[id]`** with three panels:
+**Header buttons** (live in the page header, present on all tabs):
+- 🔄 **Refresh from Hyperspell** → `fetch(FASTAPI/ingest/hyperspell)` (Yash's endpoint)
+- ✨ **Generate plan** → `fetch(FASTAPI/categorize)` (Yash's endpoint)
 
-   | Panel | Subscribes to | Renders |
-   |---|---|---|
-   | Left — **Weekly Doc** | `knowledge_entries` for project, last 7 days, ordered asc | Source chip · author · timestamp · content. Auto-scrolls. New entries fade in. |
-   | Middle — **Categorized Plan** | `categorized_items` for project | Three sub-sections (Bugs / Features / Improvements). Each card: title, description, source chips, code chips, "next step", confidence pill. |
-   | Right — **Generated Actions** | `generated_actions` joined to `categorized_items` | Tabs for Linear / PR / Devin. Each card has an "Execute" button → calls `POST /actions/{id}/execute`. On success, status flips to `executed` and an external link appears. |
-
-3. **Header buttons**:
-   - 🎙️ **Voice agent** → mounts Yudong's `VoiceAgent` component.
-   - 🔄 **Pull from Hyperspell** → `fetch(FASTAPI/ingest/hyperspell, ...)` (Yash's endpoint).
-   - ✨ **Generate plan** → `fetch(FASTAPI/categorize, ...)`.
-
-4. **Vercel deploy** with all env vars. Public URL is mandatory — judging rules disqualify localhost links.
-
-**Yash will help you with**: the Supabase schema design (§7), wiring the service role key into his FastAPI, and debugging any Postgres weirdness. Pair on schema setup tonight.
+(The 🎙️ voice agent button lives **inside** the Knowledge tab, owned by Yudong's component.)
 
 **Milestones**
 - 10:30am — Supabase schema deployed; teammates have keys.
-- 11:30am — Page renders dummy rows from Supabase via realtime channels.
-- 1:00pm — Left panel shows live transcript entries from Yudong's component.
-- 3:00pm — Middle + right panels render data Yash's pipeline writes.
-- 5:30pm — Vercel-deployed URL works cleanly on a laptop AND a phone.
-
-**Files you own**
-- `supabase/schema.sql` (collaborative with Yash)
-- `frontend/app/project/[id]/page.tsx`
-- `frontend/components/{WeeklyDocPanel,PlanPanel,ActionsPanel}.tsx`
-- `frontend/lib/supabase.ts`
+- 11:30am — `/projects` and `/projects/[id]` skeleton; tab switcher works; dummy rows render.
+- 1:00pm — Knowledge tab shows live entries from realtime channel (Yudong's writes light it up).
+- 3:00pm — Insights and Actions tabs render real data Yash's pipeline writes.
+- 5:30pm — Polished, deployed Vercel URL works on laptop + phone.
 
 ---
 
 ### 🧠 Yash — Backend, Hyperspell, Categorizer, Executors
 
-The heaviest role. You own everything that turns inputs into actionable output.
+Heaviest role. Owns FastAPI surface, Hyperspell, Claude categorizer, executors, and the cron.
 
-**Your slice of the flow**
+**Endpoints** (all in `backend/`)
 
-```
-                           ┌─── Yudong's voice ────┐
-                           │                       │
-                           ▼                       │
-   Hyperspell ──┐    POST /voice/append            │
-                ├─► insert into knowledge_entries  │
-   Manual pull ─┘    (source='voice'/'slack'/...)  │
-   (POST /ingest/                                  │
-    hyperspell)                                    │
-                                                   │
-                ┌──────────────────────────────────┘
-                │
-                ▼
-         Weekly Doc (knowledge_entries, last 7d, per project)
-                │
-                │  POST /categorize
-                ▼
-         Claude → CategorizedPlan(bugs, features, improvements)
-                │
-                ├─► insert categorized_items
-                │
-                ├─► for each item, draft 3 actions (Linear/PR/Devin)
-                │   insert generated_actions (status='draft')
-                │
-                ▼
-         (Jin's UI lights up)
+| Method | Path | Caller | Purpose |
+|---|---|---|---|
+| POST | `/rt/token` | Yudong | mint OpenAI Realtime ephemeral token |
+| GET  | `/context/briefing?projectId=X` | Yudong | assemble briefing from Hyperspell + last 7d entries |
+| POST | `/ingest/hyperspell` | Jin button + 5min cron | search Hyperspell, INSERT into `knowledge_entries` (dedup by `ref_url`) |
+| POST | `/categorize` | Jin button (also auto on meeting end) | Claude over weekly doc → INSERT `categorized_items` + `generated_actions` |
+| POST | `/actions/{id}/execute` | Jin button | dispatch to Linear/GitHub/Devin, UPDATE `external_url`, `status` |
 
-                ┌─── Jin's "Execute" click ─┐
-                │                            │
-                ▼                            │
-         POST /actions/{id}/execute          │
-                │                            │
-                ▼                            │
-         Linear / GitHub / Devin API         │
-                │                            │
-                ▼                            │
-         update generated_actions.external_url, status='executed'
-```
+**Key implementation notes**
 
-**What you build**
+1. **`/context/briefing`** caches per `(projectId, day)` in process memory. Builds from:
+   - last 7d of `knowledge_entries` for the project
+   - latest 3 design docs from Hyperspell (filter `source=drive`)
+   - latest 5 GitHub commits/PRs from Hyperspell (filter `source=github`)
+   - cached 1-paragraph project summary (regenerated at most 1×/hour)
 
-1. **FastAPI app** at `backend/`:
-   ```
-   backend/
-     main.py                       # FastAPI app + CORS + router includes
-     routers/
-       realtime.py                 # POST /rt/token
-       voice.py                    # POST /voice/append
-       ingest.py                   # POST /ingest/hyperspell
-       context.py                  # GET  /context/briefing
-       categorize.py               # POST /categorize
-       actions.py                  # POST /actions/{id}/execute
-     services/
-       hyperspell.py               # search wrapper
-       briefing_builder.py         # builds the project briefing for Yudong
-       voice_summarizer.py         # uses briefing as system prompt
-                                   # → structured note from chunk
-       categorizer.py              # Claude Sonnet 4.6 over weekly doc
-       action_drafts.py            # ticket / PR / Devin draft generators
-       executors/{linear,github,devin}.py
-       supabase_writer.py          # supabase-py wrappers
-     schemas.py                    # Pydantic models matching §6
-     settings.py                   # env vars
-   ```
+2. **`/ingest/hyperspell`** — the **dedupe key is `(project_id, source, ref_url)`** (unique index in §6). Re-running is safe.
 
-2. **`POST /rt/token`** — proxy to OpenAI (uses your master key, returns ephemeral):
+3. **`/categorize`** — reads `knowledge_entries` for the project where `ts > now() - 7 days`. Builds working window prompt. Calls Claude with Anthropic tool-use schema. Inserts `categorized_items` + 3 `generated_actions` per item (Linear / PR / Devin drafts).
+
+4. **APScheduler cron** in FastAPI startup:
    ```python
-   r = await httpx.post(
-       "https://api.openai.com/v1/realtime/sessions",
-       headers={"Authorization": f"Bearer {OPENAI_KEY}"},
-       json={"model": "gpt-realtime-whisper", "modalities": ["text"]},
-   )
-   return r.json()
+   from apscheduler.schedulers.asyncio import AsyncIOScheduler
+   sched = AsyncIOScheduler()
+   sched.add_job(lambda: ingest_all_projects(), "interval", minutes=5)
+   sched.start()
    ```
+   *(Stretch: replace this with a Tensorlake job to add Tensorlake as a 5th sponsor.)*
 
-3. **`POST /voice/append`** — `{projectId, meetingId, raw_transcript, briefing_id, ts}` →
-   - Look up briefing by `briefing_id` (in-memory cache).
-   - Call `voice_summarizer.summarize(raw_transcript, briefing)` → returns 1–3 structured notes typed as `decision | action_item | blocker | mention | fyi`, each cross-referencing entities from the briefing where possible.
-   - Insert each note into `knowledge_entries` with `source='voice'`, `author='voice_agent'`.
-   - Return 200.
+5. **No `/voice/append`** — Yudong writes voice notes directly to Supabase via the anon key. Yash never sees individual transcript chunks. Less coupling, fewer endpoints.
 
-3a. **`GET /context/briefing?projectId=X`** — assembles a briefing for Yudong's voice agent →
-   - Pull last 7 days of `knowledge_entries` for the project (the running weekly doc).
-   - Pull from Hyperspell: latest 3 design docs, latest 5 GitHub commits/PRs, top open Slack threads.
-   - Generate a 1-paragraph project summary (cache per project; regenerate at most 1×/hour).
-   - Cache the assembled briefing in memory keyed by `(projectId, day)` — return same `id` on re-fetch the same day.
-   - Return the schema in §5.7.
+**Files**
 
-4. **`POST /ingest/hyperspell`** — `{projectId}` →
-   - Call `hyperspell.memories.search(query=<project_query>, sources=["slack","google_drive","notion","github"], options={"max_results": 20})`.
-   - For each hit, insert into `knowledge_entries` with the right `source` (and `code_path`/`code_lines` if it's a GitHub code hit).
-   - Dedupe by `ref_url` so re-running doesn't double-insert.
-   - Return 200 with count inserted.
-
-5. **`POST /categorize`** — `{projectId}` →
-   - Read `knowledge_entries` for project, last 7 days, ordered by `ts asc`.
-   - Build a working window prompt (instructions + the entries as a numbered list).
-   - Call Claude with Anthropic tool-use schema — guaranteed valid JSON matching §6.
-   - For each item in the response:
-     - Insert `categorized_items` row.
-     - Generate three drafts (Linear ticket, GitHub PR description, Devin handoff payload) via `action_drafts.for_item(item)` — each is a small prompt.
-     - Insert three `generated_actions` rows with `status='draft'`.
-   - Return 202 + the count of items generated.
-
-6. **`POST /actions/{id}/execute`** — read action from Supabase, dispatch to right executor, write back `external_url` + `status='executed'`, return URL.
-
-7. **Pair with Jin tonight** on the Supabase schema (§7) and the realtime tables.
+```
+backend/
+  main.py                       # FastAPI app, CORS, scheduler startup
+  routers/
+    realtime.py                 # /rt/token
+    context.py                  # /context/briefing
+    ingest.py                   # /ingest/hyperspell
+    categorize.py               # /categorize
+    actions.py                  # /actions/{id}/execute
+  services/
+    hyperspell.py               # search wrapper
+    briefing_builder.py         # cached briefing assembly
+    categorizer.py              # Claude over weekly doc
+    action_drafts.py            # ticket / PR / Devin draft generators
+    executors/{linear,github,devin}.py
+    supabase_writer.py          # supabase-py wrappers
+  jobs/
+    ingest_cron.py              # APScheduler job
+  schemas.py                    # Pydantic models
+  settings.py                   # env vars
+```
 
 **Milestones**
-- Night before: Hyperspell connectors live + corpus ingested + verified search returns the expected items.
-- 11:00am: FastAPI running, `/rt/token` returns ephemeral, schema + Pydantic models compile.
-- 12:30pm: `/context/briefing` returns a real briefing assembled from Hyperspell + recent entries.
-- 1:00pm: `/voice/append` (briefing-aware) writes structured notes from Yudong's chunks; Jin's left panel sees them.
-- 2:30pm: `/ingest/hyperspell` works end-to-end against the real Hyperspell project.
-- 3:30pm: `/categorize` returns valid Claude output; entries appear in Jin's middle/right panels.
-- 5:00pm: `/actions/{id}/execute` actually creates real Linear tickets.
-
-**Files you own**
-- everything under `backend/`
-- collaborate on `supabase/schema.sql` with Jin
+- Night before: Hyperspell connectors live + corpus ingested + verified search returns expected items.
+- 11:00am: FastAPI running, `/rt/token` + `/context/briefing` return real data.
+- 1:00pm: `/ingest/hyperspell` works; Jin's Knowledge tab populates.
+- 3:00pm: `/categorize` returns valid Claude output; Insights + Actions tabs populate.
+- 4:00pm: APScheduler cron live; verify `/ingest/hyperspell` re-runs every 5 min.
+- 5:00pm: `/actions/{id}/execute` creates real Linear tickets.
 
 ---
 
-## 4. Build Order (one-day timeline)
+## 3.5 Conflict Map & Ownership Rules
+
+### Hard "never touches"
+
+| Person | Never touches |
+|---|---|
+| **Yash**   | Frontend code. The schema SQL file directly (submits migrations only). |
+| **Jin**    | Backend Python. Voice agent components or its helpers. |
+| **Yudong** | Backend Python. Schema SQL. Page chrome, global styling, the three tabs. |
+
+### File ownership (one path → one owner)
+
+| Path | Owner |
+|---|---|
+| `backend/**` | Yash |
+| `frontend/app/{projects,layout}**`, `frontend/app/projects/[id]/_tabs/**` | Jin |
+| `frontend/components/{WeeklyDoc,BugCard,FeatureCard,ImprovementCard,ActionCard}.tsx`, `frontend/lib/supabase.ts`, Tailwind config, `globals.css` | Jin |
+| `frontend/components/{VoiceAgent,BriefingPanel}.tsx`, `frontend/lib/{realtime,meetingAudio,voiceNoteSchema}.ts`, `frontend/app/api/voice/**` | Yudong |
+| `supabase/schema.sql` | Jin (canonical) |
+| `supabase/migrations/*.sql` | Yash adds, Jin reviews + applies |
+| `demo/**` | Yudong |
+
+### Schema change workflow
+
+1. Pre-day: Yash + Jin pair on `supabase/schema.sql`. Apply it. **Frozen at 9:30am sync.**
+2. Mid-day: Yash needs a new column → writes `supabase/migrations/000N_<thing>.sql` → pings Jin → Jin applies via Supabase SQL editor.
+3. **No silent edits** to `schema.sql` after 9:30am.
+
+### Component contract (Jin ↔ Yudong)
+
+```tsx
+// frontend/components/VoiceAgent.tsx — Yudong owns
+export function VoiceAgent({ projectId, meetingId }: { projectId: string; meetingId: string }) {...}
+```
+
+Jin mounts it once inside the Knowledge tab. **No callbacks back into the page** — agent communicates by writing to Supabase; Jin's tab sees changes via realtime.
+
+### Supabase write rules
+
+- **Anon key** (frontend): `INSERT` allowed on `knowledge_entries` only (Yudong). `SELECT` allowed on all reactive tables (Jin's subscriptions). Everything else denied. RLS policies in §6.
+- **Service role key** (Yash's backend): full access. Bypasses RLS.
+- Frontend never uses the service key. Backend never uses the anon key.
+
+### Realtime subscription rule
+
+**Only Jin subscribes to Supabase.** Yudong's component never opens a channel — he relies on the response of his own `INSERT` for confirmation.
+
+### Communication triggers
+
+| Trigger | Who pings whom |
+|---|---|
+| Schema change needed | Yash → Jin |
+| Briefing schema needs a new field | Yudong → Yash |
+| Hyperspell isn't returning expected items | Yash → Yudong (corpus may need adjustment) |
+| Voice notes come out generic | Yudong tunes his summarizer prompt; loops Yash in only if it's a briefing data issue |
+| Vercel env var missing | Jin → Yash |
+| FastAPI URL changes (ngrok restart) | Yash → Jin (update Vercel env) |
+
+Anything else: don't interrupt; Slack message; keep building.
+
+---
+
+## 4. Build Order
 
 ```
 8:00 AM   Doors. Breakfast.
           NIGHT-BEFORE WORK MUST BE DONE:
-            • Yash:   Hyperspell connectors live + corpus ingested
+            • Yash: Hyperspell connectors live + corpus ingested
             • Yudong: standup script v1 + corpus content drafted
-            • Jin:    Supabase project + schema deployed + Vercel project linked
+            • Jin: Supabase project + schema deployed + Vercel project linked
 
 9:15 AM   Hacking starts.
           [ALL] 30-min sync. Whiteboard the contracts (§5). Distribute keys.
 
 9:45 AM   PARALLEL ─────────────────────────────────────────────────────
-          Yash:   FastAPI scaffold; /rt/token; supabase-py wired.
-                  Stub /voice/append and /categorize that return 200 + dummy.
-          Yudong: VoiceAgent skeleton — gets ephemeral token, opens session.
-          Jin:    Next.js scaffold; supabase-js wired; 3 panels render
-                  dummy rows live from Supabase.
+          Yash:   FastAPI scaffold; /rt/token + /context/briefing.
+          Yudong: VoiceAgent skeleton — gets ephemeral token, mic-only.
+                  Stub /api/voice/summarize returning fake notes.
+          Jin:    Next.js scaffold; supabase-js wired; /projects list +
+                  /projects/[id] tab shell rendering dummy rows.
 
 11:00 AM  CHECKPOINT
-          • Voice agent shows transcript deltas in console.
-          • Page renders dummy rows reactively from Supabase.
-          • Yash can call hyperspell.memories.search and get real items.
+          • Yudong: WebRTC session opens, deltas in console.
+          • Jin:    tabs switch, all three render dummy data.
+          • Yash:   /context/briefing returns a real briefing.
 
 11:00 AM  PARALLEL ─────────────────────────────────────────────────────
-          Yash:   real /voice/append (with summarizer) + real /ingest/hyperspell.
-          Yudong: WebRTC chunk-flush every 20s → Yash's endpoint.
-          Jin:    Weekly Doc panel polished. Add the three header buttons.
+          Yash:   /ingest/hyperspell against real Hyperspell.
+          Yudong: tab+mic mixer; real /api/voice/summarize using briefing.
+          Jin:    Knowledge tab subscribes to realtime; live transcript flows.
 
-12:00 PM  Hyperspell speaker session — Yash attends.
-12:30 PM  Lunch.
+12:00     Hyperspell speaker session — Yash attends.
+12:30     Lunch.
 
 1:30 PM   CHECKPOINT
-          • Live transcript flows mic → Yudong → Yash → Supabase → Jin's UI.
-          • /ingest/hyperspell button populates the doc with Slack/Drive items.
+          • Voice notes: mic → summarizer → Supabase → Knowledge tab. ✓
+          • Hyperspell ingestion populates Knowledge tab on button click. ✓
 
 1:30 PM   PARALLEL ─────────────────────────────────────────────────────
-          Yash:   /categorize end-to-end. Action draft generators.
-                  Executors hitting real Linear/GitHub/Devin in sandbox.
-          Yudong: rehearse the voice script; tune the summarizer prompt
-                  with Yash so notes come out clean.
-          Jin:    middle + right panels reactive. Animations, skeletons,
-                  "ticket created ✓" toast, error states.
+          Yash:   /categorize end-to-end. Action drafts. Executors.
+                  APScheduler cron added.
+          Yudong: rehearse standup; tune summarizer prompt.
+          Jin:    Insights + Actions tabs reactive. Animations, toasts,
+                  error states.
 
-3:00 PM   Speaker session — Yudong attends; Yash + Jin keep building.
-
+3:00 PM   Speaker session — Yudong attends.
 3:30 PM   CHECKPOINT — END-TO-END WORKING. Lock no new features.
 
 3:30 PM   POLISH
-          Yash:   prompt tuning so the plan reads like a senior eng wrote it.
+          Yash:   prompt tuning; verify cron isn't spamming Slack;
+                  optional Tensorlake swap.
           Yudong: rehearsal lead.
-          Jin:    visual polish, mobile-safe, deploy to Vercel.
+          Jin:    visual polish; mobile-safe; deploy to Vercel.
 
-4:30 PM   FULL REHEARSAL #1 — fix everything that surfaces.
-5:30 PM   FULL REHEARSAL #2 — record a backup video.
+4:30 PM   FULL REHEARSAL #1.
+5:30 PM   FULL REHEARSAL #2 — record backup video.
 6:00 PM   SUBMIT.
 6:10 PM   Judging.
 ```
@@ -519,57 +502,22 @@ The heaviest role. You own everything that turns inputs into actionable output.
 
 ## 5. Interface Contracts (frozen at 9:30am)
 
-### 5.1 `/voice/append` (Yudong → Yash)
+### 5.1 `/rt/token` (Yudong → Yash)
 
 ```http
-POST {FASTAPI_URL}/voice/append
-Content-Type: application/json
-
-{ "projectId": "<uuid>", "meetingId": "<uuid>",
-  "raw_transcript": "string",
-  "briefing_id":   "<uuid>",            // from /context/briefing
-  "ts": 1715275200000 }
-
-→ 200 OK   { "inserted": 2 }
-```
-
-### 5.2 `/ingest/hyperspell` (Jin → Yash)
-
-```http
-POST {FASTAPI_URL}/ingest/hyperspell    { "projectId": "<uuid>" }
-→ 200 OK   { "inserted": 14 }
-```
-
-### 5.3 `/categorize` (Jin → Yash)
-
-```http
-POST {FASTAPI_URL}/categorize    { "projectId": "<uuid>" }
-→ 202 Accepted   { "items": 5 }   // pipeline runs async; UI sees rows appear
-```
-
-### 5.4 `/actions/{id}/execute` (Jin → Yash)
-
-```http
-POST {FASTAPI_URL}/actions/{actionId}/execute
-→ 200 OK   { "externalUrl": "https://linear.app/.../ABC-42" }
-```
-
-### 5.5 `/rt/token` (Yudong → Yash)
-
-```http
-POST {FASTAPI_URL}/rt/token
+POST {FASTAPI}/rt/token
 → 200 OK   { "client_secret": { "value": "ek_..." }, ... }
 ```
 
-### 5.6 `/context/briefing` (Yudong → Yash)
+### 5.2 `/context/briefing` (Yudong → Yash)
 
 ```http
-GET {FASTAPI_URL}/context/briefing?projectId=<uuid>
-
+GET {FASTAPI}/context/briefing?projectId=<uuid>
 → 200 OK
 {
-  "id": "<briefing_uuid>",                // pass back in /voice/append
+  "id": "<briefing_uuid>",
   "project_summary": "string",
+  "themes":         ["string"],
   "recent_decisions": [{ "summary": "...", "ts": "...", "ref_url": "..." }],
   "open_threads":     [{ "source": "slack|notion", "label": "...", "count": 6 }],
   "latest_docs":      [{ "title": "...", "url": "...", "ts": "..." }],
@@ -578,39 +526,53 @@ GET {FASTAPI_URL}/context/briefing?projectId=<uuid>
 }
 ```
 
-Cached server-side keyed by `(projectId, day)`. Yudong renders the briefing in the agent's left rail and references the `id` in every `/voice/append` call.
+### 5.3 `/api/voice/summarize` (Yudong's own route)
 
-### 5.7 Supabase schema (Jin owns; Yash writes; Yudong's component writes via Yash only)
-
-See §7. Frozen at 9:30am.
-
----
-
-## 6. Categorizer Output Schema (frozen)
-
-```json
-{
-  "bugFixes":     [Item],
-  "newFeatures":  [Item],
-  "improvements": [Item]
-}
-
-Item = {
-  "title": "string ≤80 chars",
-  "description": "string ≤400 chars",
-  "sourceRefs": [{ "source": "voice|slack|drive|notion|github|gmail",
-                   "url": "string|null", "snippet": "string ≤200" }],
-  "codeRefs":   [{ "path": "string", "lines": "string", "snippet": "string ≤200" }],
-  "nextStep": "string ≤200",
-  "confidence": 0.0
-}
+```http
+POST /api/voice/summarize
+{ "transcript_chunk": "string", "briefing": <briefing-object> }
+→ 200 OK   [
+  { "type": "decision|action_item|blocker|mention|fyi",
+    "text": "string ≤300 chars",
+    "refs_to": ["string"] }
+]
 ```
 
-Used as the Claude tool-use schema (guarantees valid JSON). Frontend renders directly.
+### 5.4 Supabase writes (Yudong)
+
+```ts
+await supabase.from("knowledge_entries").insert({
+  project_id, meeting_id, source: "voice", author: "voice_agent",
+  content: note.text, metadata: note,
+});
+```
+
+### 5.5 `/ingest/hyperspell` (Jin button + cron → Yash)
+
+```http
+POST {FASTAPI}/ingest/hyperspell    { "projectId": "<uuid>" }
+→ 200 OK   { "inserted": 14, "skipped_dupes": 22 }
+```
+
+### 5.6 `/categorize` (Jin → Yash)
+
+```http
+POST {FASTAPI}/categorize    { "projectId": "<uuid>" }
+→ 202 Accepted   { "items": 5 }
+```
+
+### 5.7 `/actions/{id}/execute` (Jin → Yash)
+
+```http
+POST {FASTAPI}/actions/{actionId}/execute
+→ 200 OK   { "externalUrl": "https://linear.app/.../ABC-42" }
+```
 
 ---
 
-## 7. Supabase Schema
+## 6. Supabase Schema + RLS
+
+### Schema
 
 ```sql
 create extension if not exists "uuid-ossp";
@@ -641,9 +603,10 @@ create table knowledge_entries (
   source entry_source not null,
   author text,
   content text not null,
-  ref_url text,                 -- dedupe key for ingestion
-  code_path text,               -- only when source='github' and is code
-  code_lines text,              -- "12-34"
+  ref_url text,
+  code_path text,
+  code_lines text,
+  metadata jsonb,
   ts timestamptz default now()
 );
 create unique index on knowledge_entries (project_id, source, ref_url) where ref_url is not null;
@@ -678,110 +641,223 @@ create table generated_actions (
 create index on generated_actions (categorized_item_id);
 ```
 
-**Realtime publication** — enable `supabase_realtime` for: `knowledge_entries`, `categorized_items`, `generated_actions`.
+### Realtime publication
 
-**RLS** — disable for the hackathon:
+Enable `supabase_realtime` for: `knowledge_entries`, `categorized_items`, `generated_actions`.
+
+### RLS policies (locked-down anon, full service)
+
 ```sql
-alter table knowledge_entries  disable row level security;
-alter table categorized_items  disable row level security;
-alter table generated_actions  disable row level security;
-alter table meetings           disable row level security;
-alter table projects           disable row level security;
+alter table knowledge_entries enable row level security;
+alter table categorized_items enable row level security;
+alter table generated_actions enable row level security;
+alter table projects          enable row level security;
+alter table meetings          enable row level security;
+
+-- anon can read everything (for Jin's subscriptions)
+create policy anon_read_all_kn on knowledge_entries  for select to anon using (true);
+create policy anon_read_all_ci on categorized_items  for select to anon using (true);
+create policy anon_read_all_ga on generated_actions  for select to anon using (true);
+create policy anon_read_all_p  on projects           for select to anon using (true);
+create policy anon_read_all_m  on meetings           for select to anon using (true);
+
+-- anon can INSERT only into knowledge_entries with source='voice' (Yudong's voice agent)
+create policy anon_insert_voice on knowledge_entries
+  for insert to anon
+  with check (source = 'voice');
+
+-- service role bypasses RLS automatically (Yash's backend)
 ```
 
-**Frontend subscription pattern** (Jin):
+### Frontend subscription (Jin)
+
 ```ts
-supabase
-  .channel(`doc:${projectId}`)
+supabase.channel(`kn:${projectId}`)
   .on("postgres_changes",
     { event: "INSERT", schema: "public", table: "knowledge_entries",
       filter: `project_id=eq.${projectId}` },
-    p => append(p.new))
+    (p) => append(p.new))
   .subscribe();
 ```
 
-**Backend write pattern** (Yash):
+### Backend write (Yash)
+
 ```python
-from supabase import create_client
-sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-sb.table("knowledge_entries").insert({...}).execute()
+sb.table("categorized_items").insert({...}).execute()  # service role; bypasses RLS
+```
+
+### Frontend INSERT (Yudong)
+
+```ts
+await supabase.from("knowledge_entries").insert({
+  project_id, meeting_id, source: "voice", author: "voice_agent", content, metadata,
+});
 ```
 
 ---
 
-## 8. Demo Script (90 seconds)
+## 7. Categorizer Output Schema (frozen)
+
+```json
+{ "bugFixes": [Item], "newFeatures": [Item], "improvements": [Item] }
+
+Item = {
+  "title": "string ≤80 chars",
+  "description": "string ≤400 chars",
+  "sourceRefs": [{ "source": "voice|slack|drive|notion|github|gmail",
+                   "url": "string|null", "snippet": "string ≤200" }],
+  "codeRefs":   [{ "path": "string", "lines": "string", "snippet": "string ≤200" }],
+  "nextStep": "string ≤200",
+  "confidence": 0.0
+}
+```
+
+Used as Claude's tool-use schema. Frontend renders directly.
+
+---
+
+## 8. Realtime Update Flow (the demo magic, end-to-end)
+
+```
+                    INSERT or UPDATE on Supabase
+                              │
+                              ▼
+              Postgres logical replication captures it
+                              │
+                              ▼
+              Supabase Realtime broadcasts postgres_changes
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+  Jin's Knowledge       Jin's Insights        Jin's Actions
+  tab subscription      tab subscription      tab subscription
+        │                     │                     │
+        ▼                     ▼                     ▼
+  React state              React state           React state
+  updates → re-render        updates               updates
+```
+
+**Concrete examples**
+
+- Yudong inserts a voice note: ~200ms later it appears in Knowledge tab.
+- Yash's cron runs `/ingest/hyperspell`: new Slack/Drive entries appear in Knowledge tab silently every 5 min.
+- Jin clicks ✨ Generate plan → Yash's `/categorize` writes → Insights tab populates with cards animating in; Actions tab simultaneously populates with Linear/PR/Devin drafts.
+- Jin clicks Execute on a Linear card → Yash's executor creates the ticket and updates the row → Actions tab swaps the button for the external link.
+
+No polling anywhere. No manual refresh. Subscribe once on tab mount, unsubscribe on unmount.
+
+---
+
+## 9. Hyperspell Reprocessing (cron)
+
+**Why**: connector data drifts (new Slack messages, edited docs). The weekly doc has to stay fresh without human intervention.
+
+**Implementation** (in FastAPI startup):
+
+```python
+# backend/main.py
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from jobs.ingest_cron import ingest_all_projects
+
+scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def start_scheduler():
+    scheduler.add_job(ingest_all_projects, "interval", minutes=5, id="hs_ingest")
+    scheduler.start()
+```
+
+```python
+# backend/jobs/ingest_cron.py
+async def ingest_all_projects():
+    projects = await sb.table("projects").select("*").execute()
+    for p in projects.data:
+        try:
+            await ingest_hyperspell(p["id"])  # same path as the manual button
+        except Exception as e:
+            log.exception(f"hs_ingest failed for {p['id']}: {e}")
+```
+
+Idempotent because `/ingest/hyperspell` dedups on `(project_id, source, ref_url)` — re-running is safe and cheap.
+
+**Stretch (5th sponsor)**: replace the APScheduler block with a Tensorlake job. Same function body, different scheduler. The Tensorlake docs walk through this in ~20 min. Worth doing only after 4pm — it's a sponsor logo, not a feature.
+
+---
+
+## 10. Demo Script (90 seconds)
 
 > **Yash (10s):** *"This is Project Brain. Engineering teams already have all the context they need — it's just scattered. Slack, docs, meetings, code. We turn that into an executable plan, live."*
 
-> **(Page open. Weekly Doc on the left already shows ~5 entries from Hyperspell — Slack threads, the design doc, a stale GitHub PR.)*
+> **(Page open. Knowledge tab. Weekly doc already shows ~5 entries from Hyperspell.)*
 
-> **Yudong (5s) — clicks 🎙️ Voice agent:** *"Watch — I'll just join a standup."*
+> **Yudong (5s) — clicks 🎙️ Join meeting:** *"Watch — I'll join a standup."*
 
-> **Yudong (15s) — speaks into mic:** *"Quick standup. The login flow is broken on Safari, we caught it in #bugs yesterday. Yash's design doc has us shipping CSV export this sprint, but the rate-limit middleware needs cleanup before we touch that. That's it."*
+> **Yudong (15s) — speaks into mic:** *"Quick standup. The login flow is broken on Safari, we caught it in #bugs yesterday. Yash's design doc has us shipping CSV export this sprint, but the rate-limit middleware needs cleanup before we touch that."*
 
-> **(While speaking, voice notes appear in the Weekly Doc with the 🎙️ icon.)*
+> **(Voice notes appear in Knowledge tab with 🎙️ icon as he speaks.)*
 
-> **Yash (5s) — clicks ✨ Generate plan:** *"Now we run Claude over the whole weekly doc."*
+> **Yash (5s) — switches to Insights tab, clicks ✨ Generate plan:** *"Now we run Claude over the whole weekly doc."*
 
-> **(~5s pause. Three categorized cards animate into the middle panel: Safari bug, CSV export feature, rate-limit cleanup. Action cards animate into the right panel.)*
+> **(~5s. Cards animate into Insights tab: Safari bug, CSV export, rate-limit cleanup.)*
 
-> **Jin (20s):** *"One bug, one feature, one improvement — every one with the source it came from and the file it touches. Watch — "* (clicks **Create in Linear**) *"that ticket just hit our real Linear board."* (clicks **Send to Devin**) *"And Devin gets the full context bundle to start working on it autonomously."*
+> **Jin (20s) — switches to Actions tab:** *"One bug, one feature, one improvement — every one with the source it came from and the file it touches. Watch — "* (clicks **Create in Linear**) *"that ticket just hit our real Linear board."* (clicks **Send to Devin**) *"Devin gets the full context bundle to start working on it autonomously."*
 
 > **Yash (10s):** *"Four sponsors stitched into one product — Hyperspell, OpenAI Realtime, Vercel, Devin — solving a problem every engineering team here has. Questions?"*
 
 ---
 
-## 9. Risk Register & Fallbacks
+## 11. Risk Register & Fallbacks
 
 | Risk | Mitigation |
 |---|---|
-| OpenAI Realtime flaky on event Wi-Fi | Phone hotspot. Final fallback: prerecorded transcript replay script that inserts entries with `source='voice'` at the right cadence. |
-| Hyperspell sync incomplete by 9am | **Why we ingest the night before.** If still incomplete, `/ingest/hyperspell` falls back to a hardcoded fixture file that inserts realistic entries. Same demo. |
-| Hyperspell GitHub doesn't return code-level snippets | Pre-stage 3 code-snippet fixtures keyed to the demo signals; merge them into `/ingest/hyperspell` output. |
-| Claude returns malformed JSON | Anthropic tool-use schema. Pydantic-validate; one retry on failure. |
-| Supabase realtime drops a row | Each panel does an initial `select` on mount, then layers realtime inserts. Refresh fixes any miss. |
-| Linear / GitHub action fails live | Pre-create projects + tokens validated at 4pm. If still failing, skip live execution — show the perfect draft (judges score draft quality, not the API call). |
+| OpenAI Realtime flaky on event Wi-Fi | Phone hotspot. Final fallback: prerecorded transcript replay script. |
+| Hyperspell sync incomplete by 9am | Ingested night before; fallback fixture file feeds `/ingest/hyperspell`. |
+| Hyperspell GitHub doesn't return code-level snippets | Pre-stage 3 code-snippet fixtures keyed to demo signals. |
+| Claude returns malformed JSON | Anthropic tool-use schema; Pydantic-validate; one retry. |
+| Supabase realtime drops a row | Each tab does initial `select` on mount, then layers inserts. Refresh fixes any miss. |
+| Linear / GitHub action fails live | Pre-create projects + tokens validated at 4pm. Skip live execution → show the polished draft. |
+| Anon-key INSERT denied by RLS | Test from a clean browser at 11:30am. The `anon_insert_voice` policy must be applied. |
+| Cron job fires during demo and creates noise | Disable `hs_ingest` job at 5:55pm: `scheduler.pause_job("hs_ingest")`. |
 | Demo over 3 minutes | Yudong is the timer. Cut intro, not demo. |
-| FastAPI not reachable from Vercel | ngrok stable URL, baked into `NEXT_PUBLIC_FASTAPI_URL`. Test from Vercel preview at 5:00pm. |
+| FastAPI not reachable from Vercel | ngrok stable URL baked into `NEXT_PUBLIC_FASTAPI_URL`. Test from Vercel preview at 5:00pm. |
 
 ---
 
-## 10. Sponsor Coverage
-
-Visible in the 3-min pitch and named in the README:
+## 12. Sponsor Coverage
 
 - [x] **Hyperspell** — sole context layer. Track sponsor → $1k cash + 6mo unlimited + founders deploy session.
 - [x] **OpenAI** — Realtime API for the voice agent. Mention `gpt-realtime-whisper`.
 - [x] **Vercel** — public deploy URL.
-- [x] **Devin** — "Send to Devin" button visible in actions panel.
-- [ ] *Stretch:* **Tensorlake** — only if Phase 6 finishes early; nightly background brain refresh.
+- [x] **Devin** — "Send to Devin" button visible in Actions tab.
+- [ ] *Stretch:* **Tensorlake** — replace APScheduler with a Tensorlake job (5th sponsor).
 
 ---
 
-## 11. Pre-Hackathon Checklist (tonight)
+## 13. Pre-Hackathon Checklist (tonight)
 
 **Yash**
 - [ ] Hyperspell account; OAuth Slack, Drive, Notion, GitHub.
 - [ ] Ingest Yudong's seed corpus.
-- [ ] Verify `client.memories.search` returns expected items.
+- [ ] Verify search returns expected items.
 - [ ] Anthropic + OpenAI keys ready.
 - [ ] Linear sandbox project + API token.
 - [ ] GitHub PAT scoped to demo repo.
 - [ ] Devin form filled.
 - [ ] ngrok installed; reserve subdomain if possible.
-- [ ] Pair with Jin on `supabase/schema.sql` (§7).
+- [ ] Pair with Jin on `supabase/schema.sql` (§6) **including the RLS policies**.
 
 **Yudong**
 - [ ] Standup script v1 (≤60s, hits 3 signals: bug + feature + improvement).
-- [ ] Seed corpus content drafted (Slack messages, design doc, bug report, Notion plan, GitHub issues).
-- [ ] Hand corpus to Yash.
+- [ ] Seed corpus content drafted; handed to Yash.
+- [ ] Test `getDisplayMedia + getUserMedia` in your browser (Chrome/Edge required for tab audio).
 
 **Jin**
 - [ ] Supabase project created.
-- [ ] Schema applied (§7) — pair with Yash.
-- [ ] Realtime enabled on the 3 reactive tables; RLS disabled.
-- [ ] Hand keys: anon → frontend `.env`, service role → Yash only.
-- [ ] Vercel project linked to GitHub repo; verify deploy works.
+- [ ] Schema + RLS applied (§6); pair with Yash.
+- [ ] Realtime publication enabled on the 3 reactive tables.
+- [ ] Anon key → frontend `.env`. Service role key → Yash only.
+- [ ] Vercel project linked to GitHub; deploy works.
+- [ ] Confirm RLS policy `anon_insert_voice` lets a browser INSERT a voice entry.
 
 **Shared**
 - [ ] 1Password vault with all keys.
@@ -789,6 +865,6 @@ Visible in the 3-min pitch and named in the README:
 
 ---
 
-## 12. One-line summary for the judges
+## 14. One-line summary for the judges
 
-> *Project Brain keeps a per-project weekly knowledge document. A voice agent listens to your meetings, Hyperspell pulls in your Slack/docs/code, and Claude turns the doc into bug fixes, features, and improvements you can ship straight to Linear, GitHub, or Devin.*
+> *Project Brain keeps a per-project weekly knowledge document. A voice agent listens to your meetings, Hyperspell pulls in your Slack/docs/code on a 5-minute cron, and Claude turns the doc into bug fixes, features, and improvements you can ship straight to Linear, GitHub, or Devin.*
