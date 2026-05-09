@@ -218,6 +218,89 @@ async def search(
     return [it for it in items if it is not None and it.full_text]
 
 
+# ─── durable mirror (list + get per source) ───────────────────────────────────
+# Default page size for memories.list. Hyperspell caps at 100 per page.
+LIST_PAGE_SIZE = 100
+# Cap concurrent memories.get fan-out so we don't slam the API on large pages.
+GET_CONCURRENCY = 16
+
+
+async def list_and_fetch(
+    *,
+    hyperspell_user_id: str,
+    db_source: str,
+    max_items: int = LIST_PAGE_SIZE,
+    only_completed: bool = True,
+) -> list[HyperspellItem]:
+    """Mirror path: page memories.list(source=...), then memories.get per item.
+
+    Unlike ``search()`` (which is ranked and biased by query), this enumerates
+    all completed resources for a source up to ``max_items``. Use it as the
+    durable mirror into ``project_context``; pair with ``search()`` if you also
+    want a query-ranked supplement.
+
+    Returns up to ``max_items`` HyperspellItem records (skipping ones where the
+    body fetch fails or returns no text).
+    """
+    hs_source = DB_TO_HS_SOURCE.get(db_source)
+    if not hs_source or hs_source not in HS_TO_DB_SOURCE:
+        # 'github' is intentionally excluded (code_refs path), gmail not supported.
+        return []
+
+    client = get_client(hyperspell_user_id)
+
+    # 1) Page the resource list. We stop once we hit max_items or run out of pages.
+    resources: list[Any] = []
+    cursor: str | None = None
+    while len(resources) < max_items:
+        remaining = max_items - len(resources)
+        page_size = min(LIST_PAGE_SIZE, remaining)
+
+        def _do_list(_cursor: str | None = cursor, _page_size: int = page_size) -> Any:
+            kwargs: dict[str, Any] = {"source": hs_source, "size": _page_size}
+            if only_completed:
+                kwargs["status"] = "completed"
+            if _cursor:
+                kwargs["cursor"] = _cursor
+            return client.memories.list(**kwargs)
+
+        try:
+            page = await asyncio.to_thread(_do_list)
+        except Exception as e:
+            log.warning("memories.list(%s) failed: %s", hs_source, e)
+            break
+
+        items = list(getattr(page, "items", []) or [])
+        if not items:
+            break
+        resources.extend(items)
+        cursor = getattr(page, "next_cursor", None)
+        if not cursor:
+            break
+
+    if not resources:
+        return []
+
+    # 2) Fan out body fetches with a concurrency cap.
+    sem = asyncio.Semaphore(GET_CONCURRENCY)
+
+    async def _fetch(res: Any) -> HyperspellItem | None:
+        async with sem:
+            try:
+                mem = await asyncio.to_thread(
+                    client.memories.get,
+                    res.resource_id,
+                    source=res.source,
+                )
+            except Exception as e:
+                log.warning("memories.get failed for %s/%s: %s", res.source, res.resource_id, e)
+                return None
+        return _normalize(res, mem)
+
+    fetched = await asyncio.gather(*[_fetch(r) for r in resources])
+    return [it for it in fetched if it is not None and it.full_text]
+
+
 # ─── normalization ────────────────────────────────────────────────────────────
 def _normalize(doc: Any, mem: Any) -> HyperspellItem | None:
     """Combine a search Resource (`doc`) with a fetched Memory (`mem`)."""
