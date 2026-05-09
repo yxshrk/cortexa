@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable, Literal
 
 from settings import get_settings
@@ -359,6 +360,135 @@ def _extract_text(mem: Any) -> str:
                     parts.append(v.strip())
                     break
     return "\n\n".join(parts)
+
+
+def build_snippet(text: str, *, max_chars: int = 500) -> str:
+    """Build a cleaner UI snippet from noisy multi-line text."""
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    cutoff = cleaned.rfind(" ", 0, max_chars)
+    if cutoff < max_chars // 2:
+        cutoff = max_chars
+    return cleaned[:cutoff].rstrip() + "..."
+
+
+def build_embedding_text(text: str, *, max_chars: int = 8000) -> str:
+    """Create a chunk-aware embedding input for long documents.
+
+    Strategy:
+      1) Split into paragraph-like chunks.
+      2) Split very large chunks into smaller windows.
+      3) Select chunks in a diversity pattern (head/middle/tail round-robin)
+         until `max_chars` is reached.
+    """
+    chunks = _chunk_document(text)
+    if not chunks:
+        return ""
+
+    total_chars = sum(len(c) for c in chunks)
+    if total_chars <= max_chars:
+        return "\n\n---\n\n".join(chunks)
+
+    selected: list[str] = []
+    selected_chars = 0
+
+    left = 0
+    right = len(chunks) - 1
+    mid = len(chunks) // 2
+    used: set[int] = set()
+    order = ("left", "mid", "right")
+    turn = 0
+
+    while selected_chars < max_chars and len(used) < len(chunks):
+        pick: int | None = None
+        mode = order[turn % len(order)]
+        turn += 1
+
+        if mode == "left":
+            while left <= right and left in used:
+                left += 1
+            if left <= right:
+                pick = left
+        elif mode == "right":
+            while right >= left and right in used:
+                right -= 1
+            if right >= left:
+                pick = right
+        else:
+            radius = 0
+            while radius <= len(chunks):
+                cands = [mid - radius, mid + radius]
+                found = next(
+                    (
+                        i for i in cands
+                        if 0 <= i < len(chunks) and i not in used
+                    ),
+                    None,
+                )
+                if found is not None:
+                    pick = found
+                    break
+                radius += 1
+
+        if pick is None or pick in used:
+            continue
+
+        candidate = chunks[pick]
+        join_overhead = 8 if selected else 0
+        if selected_chars + len(candidate) + join_overhead > max_chars:
+            remaining = max_chars - selected_chars - join_overhead
+            if remaining >= 120:
+                selected.append(candidate[:remaining].rstrip())
+                selected_chars = max_chars
+            used.add(pick)
+            break
+
+        selected.append(candidate)
+        selected_chars += len(candidate) + join_overhead
+        used.add(pick)
+
+    return "\n\n---\n\n".join(s for s in selected if s)
+
+
+def chunking_stats(text: str, embedding_text: str) -> dict[str, int | bool]:
+    chunks = _chunk_document(text)
+    selected = [c for c in embedding_text.split("\n\n---\n\n") if c.strip()] if embedding_text else []
+    return {
+        "chunk_count_total": len(chunks),
+        "chunk_count_selected": len(selected),
+        "full_chars": len((text or "").strip()),
+        "embedding_chars": len((embedding_text or "").strip()),
+        "truncated_for_embedding": len((text or "").strip()) > len((embedding_text or "").strip()),
+    }
+
+
+def _chunk_document(text: str, *, target_chunk_chars: int = 1200) -> list[str]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n+", cleaned) if b.strip()]
+    if not blocks:
+        blocks = [cleaned]
+
+    out: list[str] = []
+    for block in blocks:
+        if len(block) <= target_chunk_chars:
+            out.append(block)
+            continue
+        i = 0
+        while i < len(block):
+            window = block[i:i + target_chunk_chars]
+            if i + target_chunk_chars < len(block):
+                cut = window.rfind(" ")
+                if cut > target_chunk_chars * 0.6:
+                    window = window[:cut]
+            out.append(window.strip())
+            i += max(1, len(window))
+    return [x for x in out if x]
 
 
 # ─── search-with-answer (richer return for /search) ───────────────────────────

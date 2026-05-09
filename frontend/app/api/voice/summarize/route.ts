@@ -3,8 +3,9 @@ import { VoiceNoteJsonSchema } from "@/lib/voiceNoteSchema";
 
 type Briefing = {
   project_summary?: string;
-  themes?: string[];
-  active_files?: { path?: string }[];
+  themes?: (string | { label?: string; count?: number })[];
+  theme_labels?: string[];
+  active_files?: { path?: string; title?: string }[];
 };
 
 export async function POST(req: Request) {
@@ -27,6 +28,14 @@ export async function POST(req: Request) {
   }
 
   const context = briefing ?? {};
+  const themeLabels =
+    context.theme_labels
+    ?? (context.themes ?? []).map((theme) =>
+      typeof theme === "string" ? theme : (theme.label ?? ""),
+    ).filter(Boolean);
+  const activeFileLabels = (context.active_files ?? [])
+    .map((file) => file.path ?? file.title ?? "")
+    .filter(Boolean);
   const completion = await openai.chat.completions.create({
     model: "gpt-4.1",
     response_format: {
@@ -39,8 +48,8 @@ export async function POST(req: Request) {
         content: [
           "You turn engineering meeting transcript chunks into 1-3 concise structured notes.",
           `Project: ${context.project_summary ?? "Unknown project"}`,
-          `Themes: ${(context.themes ?? []).join(", ")}`,
-          `Active files: ${(context.active_files ?? []).map((file) => file.path).filter(Boolean).join(", ")}`,
+          `Themes: ${themeLabels.join(", ")}`,
+          `Active files: ${activeFileLabels.join(", ")}`,
           "Each note must be one of: decision, action_item, blocker, mention, fyi.",
         ].join("\n"),
       },

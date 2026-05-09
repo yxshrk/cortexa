@@ -39,6 +39,7 @@ class IngestResponse(BaseModel):
     by_source: dict[str, int]
     errors: dict[str, str] = {}  # {db_source: error_message} for sources that failed
     write_errors: int = 0  # per-row failures during the supabase write step
+    metrics: dict[str, Any] = {}
 
 
 # Mirror cap: at most this many resources per source per ingest run. Keeps
@@ -115,7 +116,7 @@ async def ingest_hyperspell(
             k=PER_SOURCE_RANKED_SUPPLEMENT_K,
         )
 
-    async def _pull(db_src: str) -> tuple[str, list[Any], str | None]:
+    async def _pull(db_src: str) -> tuple[str, list[Any], str | None, dict[str, int]]:
         try:
             mirror_task = asyncio.create_task(_mirror(db_src))
             supp_task = asyncio.create_task(_supplement(db_src))
@@ -123,10 +124,18 @@ async def ingest_hyperspell(
                 mirror_task, supp_task, return_exceptions=False
             )
         except RuntimeError as e:
-            return db_src, [], f"sdk/key: {e}"
+            return db_src, [], f"sdk/key: {e}", {
+                "mirror_count": 0,
+                "supplement_count": 0,
+                "deduped_within_source": 0,
+            }
         except Exception as e:
             log.warning("ingest pull failed for %s: %s", db_src, e)
-            return db_src, [], f"{type(e).__name__}: {e}"
+            return db_src, [], f"{type(e).__name__}: {e}", {
+                "mirror_count": 0,
+                "supplement_count": 0,
+                "deduped_within_source": 0,
+            }
 
         # Merge with the mirror as the canonical body; supplement only adds items
         # the mirror page didn't reach.
@@ -138,14 +147,20 @@ async def ingest_hyperspell(
                 continue
             seen.add(key)
             merged.append(it)
-        return db_src, merged, None
+        return db_src, merged, None, {
+            "mirror_count": len(mirror_items),
+            "supplement_count": len(supp_items),
+            "deduped_within_source": (len(mirror_items) + len(supp_items)) - len(merged),
+        }
 
     pulls = await asyncio.gather(*[_pull(s) for s in DB_SOURCES])
 
     all_items: list[Any] = []
     by_source: dict[str, int] = {}
     errors: dict[str, str] = {}
-    for db_src, items, err in pulls:
+    source_pull_stats: dict[str, dict[str, int]] = {}
+    for db_src, items, err, pull_stats in pulls:
+        source_pull_stats[db_src] = pull_stats
         if err:
             errors[db_src] = err
         if items:
@@ -159,10 +174,16 @@ async def ingest_hyperspell(
             updated=0,
             by_source={},
             errors=errors,
+            metrics={
+                "documents_total": 0,
+                "sources_attempted": len(DB_SOURCES),
+                "sources_with_errors": len(errors),
+                "by_source_pull": source_pull_stats,
+            },
         )
 
-    # Embed in one batched call.
-    texts = [it.full_text for it in all_items]
+    # Embed in one batched call using chunk-aware representations for long docs.
+    texts = [hyperspell.build_embedding_text(it.full_text) for it in all_items]
     try:
         vectors = await embeddings.embed_many(texts)
     except Exception as e:
@@ -170,7 +191,8 @@ async def ingest_hyperspell(
         raise HTTPException(503, f"embedding failed: {e}")
 
     rows: list[dict[str, Any]] = []
-    for it, vec in zip(all_items, vectors):
+    row_text_stats: list[dict[str, Any]] = []
+    for it, vec, emb_text in zip(all_items, vectors, texts):
         content_hash = hashlib.sha256(it.full_text.encode("utf-8")).hexdigest()
         rows.append(
             {
@@ -178,7 +200,7 @@ async def ingest_hyperspell(
                 "source": it.source,
                 "external_id": it.external_id,
                 "title": it.title,
-                "snippet": (it.snippet or "")[:500] or None,
+                "snippet": hyperspell.build_snippet(it.snippet or it.full_text) or None,
                 "full_text": it.full_text,
                 "content_hash": content_hash,
                 "author": it.author,
@@ -188,8 +210,13 @@ async def ingest_hyperspell(
                 "embedding": vec,
             }
         )
+        stats = hyperspell.chunking_stats(it.full_text, emb_text)
+        stats["source"] = it.source
+        stats["snippet_chars"] = len((it.snippet or "")[:500])
+        row_text_stats.append(stats)
 
     counts = supabase_writer.upsert_project_context(sb, rows)
+    metrics = _build_ingest_metrics(row_text_stats, source_pull_stats, errors)
 
     return IngestResponse(
         upserted=counts["inserted"] + counts["updated"],
@@ -198,4 +225,58 @@ async def ingest_hyperspell(
         by_source=by_source,
         errors=errors,
         write_errors=counts["errors"],
+        metrics=metrics,
     )
+
+
+def _build_ingest_metrics(
+    row_text_stats: list[dict[str, Any]],
+    source_pull_stats: dict[str, dict[str, int]],
+    errors: dict[str, str],
+) -> dict[str, Any]:
+    if not row_text_stats:
+        return {
+            "documents_total": 0,
+            "sources_with_errors": len(errors),
+            "by_source_pull": source_pull_stats,
+        }
+
+    full_total = sum(int(r["full_chars"]) for r in row_text_stats)
+    emb_total = sum(int(r["embedding_chars"]) for r in row_text_stats)
+    truncated = sum(1 for r in row_text_stats if bool(r["truncated_for_embedding"]))
+    short_rows = sum(1 for r in row_text_stats if int(r["full_chars"]) < 120)
+    total_chunks = sum(int(r["chunk_count_total"]) for r in row_text_stats)
+    selected_chunks = sum(int(r["chunk_count_selected"]) for r in row_text_stats)
+
+    by_source: dict[str, dict[str, Any]] = {}
+    for src in sorted({str(r["source"]) for r in row_text_stats}):
+        src_rows = [r for r in row_text_stats if r["source"] == src]
+        src_full = sum(int(r["full_chars"]) for r in src_rows)
+        src_emb = sum(int(r["embedding_chars"]) for r in src_rows)
+        src_trunc = sum(1 for r in src_rows if bool(r["truncated_for_embedding"]))
+        src_chunks_total = sum(int(r["chunk_count_total"]) for r in src_rows)
+        src_chunks_selected = sum(int(r["chunk_count_selected"]) for r in src_rows)
+        by_source[src] = {
+            "rows": len(src_rows),
+            "avg_full_chars": round(src_full / len(src_rows), 1),
+            "avg_embedding_chars": round(src_emb / len(src_rows), 1),
+            "avg_chunks_total": round(src_chunks_total / len(src_rows), 2),
+            "avg_chunks_selected": round(src_chunks_selected / len(src_rows), 2),
+            "truncated_rows": src_trunc,
+            "short_rows": sum(1 for r in src_rows if int(r["full_chars"]) < 120),
+        }
+
+    return {
+        "documents_total": len(row_text_stats),
+        "embedding_chars_total": emb_total,
+        "embedding_chars_avg": round(emb_total / len(row_text_stats), 1),
+        "full_text_chars_avg": round(full_total / len(row_text_stats), 1),
+        "chunks_total": total_chunks,
+        "chunks_selected_total": selected_chunks,
+        "chunks_selected_ratio": round(selected_chunks / max(1, total_chunks), 3),
+        "truncated_for_embedding_rows": truncated,
+        "short_rows_under_120_chars": short_rows,
+        "sources_with_errors": len(errors),
+        "by_source_pull": source_pull_stats,
+        "by_source_text": by_source,
+    }

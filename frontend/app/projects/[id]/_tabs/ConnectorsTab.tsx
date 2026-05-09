@@ -21,10 +21,28 @@ type ProjectContext = {
 
 type ConnStatus = "connected" | "not_connected" | "beta";
 
+type IngestSourceTextMetric = {
+  rows?: number;
+  avg_full_chars?: number;
+  avg_embedding_chars?: number;
+  avg_chunks_total?: number;
+  avg_chunks_selected?: number;
+  truncated_rows?: number;
+  short_rows?: number;
+};
+
+type IngestMetrics = {
+  documents_total?: number;
+  chunks_total?: number;
+  chunks_selected_total?: number;
+  chunks_selected_ratio?: number;
+  by_source_text?: Record<string, IngestSourceTextMetric>;
+};
+
 type IngestResult =
   | { kind: "idle" }
   | { kind: "running" }
-  | { kind: "ok"; upserted: number; inserted: number; updated: number; sources: Record<string, number>; sourceErrors: Record<string, string>; writeErrors: number; at: number }
+  | { kind: "ok"; upserted: number; inserted: number; updated: number; sources: Record<string, number>; sourceErrors: Record<string, string>; writeErrors: number; metrics?: IngestMetrics; at: number }
   | { kind: "error"; status?: number; message: string; at: number };
 
 export default function ConnectorsTab({ projectId }: { projectId: string }) {
@@ -93,6 +111,14 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     [docs, selectedSource],
   );
   const selectedDoc = docsForSource.find((d) => d.id === selectedDocId) ?? docsForSource[0];
+  const chunkPreview = useMemo(
+    () => buildChunkPreview(selectedDoc?.full_text ?? null),
+    [selectedDoc?.id, selectedDoc?.full_text],
+  );
+  const liveChunkRatio =
+    ingestResult.kind === "ok"
+      ? ingestResult.metrics?.chunks_selected_ratio ?? null
+      : null;
 
   // Track in-flight ingest so the popup-watcher and the "just_connected"
   // bootstrap path never double-fire.
@@ -127,6 +153,7 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         sources: body.by_source ?? {},
         sourceErrors: body.errors ?? {},
         writeErrors: body.write_errors ?? 0,
+        metrics: body.metrics ?? undefined,
         at: Date.now(),
       });
     } catch (e) {
@@ -360,6 +387,30 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         )}
         {selectedDoc && (
           <div className="space-y-3">
+            <section className="relative overflow-hidden rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-violet-50 to-cyan-50 p-3 shadow-sm">
+              <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-indigo-300/40 blur-2xl" />
+              <div className="pointer-events-none absolute -bottom-10 -left-8 h-24 w-24 rounded-full bg-cyan-300/40 blur-2xl" />
+              <div className="relative z-10">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700">
+                    Chunking Aura
+                  </span>
+                  <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] text-indigo-700 shadow-sm">
+                    {chunkPreview.length} preview chunks
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-white/80">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-violet-500 to-indigo-500 transition-all duration-700"
+                    style={{ width: `${Math.round((liveChunkRatio ?? 0.5) * 100)}%` }}
+                  />
+                </div>
+                <div className="mt-1 text-[11px] text-indigo-700/90">
+                  Embed coverage {Math.round((liveChunkRatio ?? 0.5) * 100)}%
+                  {liveChunkRatio === null && " (preview estimate)"}
+                </div>
+              </div>
+            </section>
             <div>
               <div className="text-xs text-ink-400">Title</div>
               <div className="font-medium">{selectedDoc.title ?? "(untitled)"}</div>
@@ -377,6 +428,35 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               <div className="text-xs text-ink-400 mb-1">Snippet</div>
               <p className="text-sm text-ink-600">{selectedDoc.snippet}</p>
             </div>
+            {chunkPreview.length > 0 && (
+              <div>
+                <div className="mb-1 text-xs text-ink-400">Chunk Stream</div>
+                <div className="space-y-2">
+                  {chunkPreview.map((chunk, idx) => (
+                    <div
+                      key={`${selectedDoc.id}-chunk-${idx}`}
+                      className="group rounded-lg border border-ink-200 bg-white/80 p-2 shadow-[0_1px_6px_rgba(99,102,241,0.08)] transition hover:-translate-y-[1px] hover:border-indigo-300 hover:shadow-[0_4px_18px_rgba(79,70,229,0.18)]"
+                    >
+                      <div className="mb-1 flex items-center justify-between">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-indigo-600">
+                          Chunk {idx + 1}
+                        </span>
+                        <span className="text-[10px] text-ink-400">{chunk.chars} chars</span>
+                      </div>
+                      <div className="mb-1 h-1.5 overflow-hidden rounded-full bg-ink-100">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400 transition-all duration-700"
+                          style={{ width: `${Math.max(8, Math.min(100, Math.round((chunk.chars / 420) * 100)))}%` }}
+                        />
+                      </div>
+                      <p className="line-clamp-2 text-[11px] leading-relaxed text-ink-600">
+                        {chunk.text}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div>
               <div className="text-xs text-ink-400 mb-1">Full text</div>
               <pre className="text-xs whitespace-pre-wrap bg-ink-100 rounded p-2 max-h-72 overflow-auto">
@@ -508,4 +588,18 @@ function EmptyDocs({ onIngest, source }: { onIngest: () => void; source: Connect
       </div>
     </div>
   );
+}
+
+function buildChunkPreview(text: string | null): Array<{ text: string; chars: number }> {
+  if (!text?.trim()) return [];
+  const raw = text.trim();
+  const blocks = raw
+    .split(/\n\s*\n+/)
+    .map((x) => x.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const seeds = blocks.length > 0 ? blocks : [raw.replace(/\s+/g, " ")];
+  return seeds.slice(0, 6).map((block) => ({
+    text: block.length > 240 ? `${block.slice(0, 240)}...` : block,
+    chars: block.length,
+  }));
 }

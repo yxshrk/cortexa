@@ -73,7 +73,7 @@ EXPECTED: dict[str, set[str]] = {
     },
     "generation_runs": {
         "id", "project_id", "week_start", "idempotency_key", "status",
-        "error", "retry_count", "started_at", "finished_at", "created_at",
+        "error", "retry_count", "progress", "started_at", "finished_at", "created_at",
     },
     "plan_items": {
         "id", "knowledge_document_id", "project_id", "generation_run_id",
