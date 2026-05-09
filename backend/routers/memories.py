@@ -29,13 +29,25 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 log = logging.getLogger(__name__)
 
 
-def _resolve_user_id(sb: Client, project_id: str) -> str:
-    """Resolve project → hyperspell_user_id, lazily provisioning if absent."""
+def _resolve_user_id(sb: Client, project_id: str, *, provision: bool = True) -> str:
+    """Resolve project → hyperspell_user_id.
+
+    `provision=True` (default) lazily provisions on first call — used by
+    mutating endpoints that are auth-gated and may legitimately be the first
+    call for a project. `provision=False` is for read-only endpoints that
+    must not write to the project row.
+    """
     project = supabase_writer.get_project(sb, project_id)
     if not project:
         raise HTTPException(404, f"project {project_id} not found")
     user_id = project.get("hyperspell_user_id")
     if not user_id:
+        if not provision:
+            raise HTTPException(
+                409,
+                f"project {project_id} has no hyperspell_user_id yet — "
+                "call POST /connect/start first",
+            )
         user_id = f"pri-{project_id}"
         supabase_writer.set_hyperspell_user_id(sb, project_id, user_id)
     return user_id
@@ -116,7 +128,8 @@ async def upload_memory(
     summary="Per-provider indexing progress for the project",
 )
 async def status(projectId: str, sb: Client = Depends(get_supabase)) -> dict[str, Any]:
-    user_id = _resolve_user_id(sb, projectId)
+    # Read-only endpoint MUST NOT write to projects.hyperspell_user_id.
+    user_id = _resolve_user_id(sb, projectId, provision=False)
     try:
         return await hyperspell.memory_status(user_id)
     except Exception as e:

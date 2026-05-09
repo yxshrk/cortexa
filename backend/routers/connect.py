@@ -62,12 +62,27 @@ def connect_start(
         # Code refs come from a fixture or the Hyperspell GitHub search at categorize time.
         raise HTTPException(400, "github is beta — see backend/fixtures/seed_code_refs.json")
 
+    if body.source not in hyperspell.HYPERSPELL_SUPPORTED_DB_SOURCES:
+        # Hyperspell exposes only 4 providers (slack/drive/notion/github).
+        # Gmail in particular is in our DB enum but NOT a Hyperspell connector.
+        raise HTTPException(
+            400,
+            f"{body.source!r} is not currently supported by Hyperspell. "
+            f"Supported: {sorted(hyperspell.HYPERSPELL_SUPPORTED_DB_SOURCES)}",
+        )
+
     try:
         url = hyperspell.connect_url(user_id, body.source, redirect_url=body.redirectUrl)
+    except ValueError as e:
+        # Programmer error — unsupported source slipped past the guard above.
+        raise HTTPException(400, str(e))
     except Exception as e:
         log.exception("connect_url failed")
         raise HTTPException(502, f"hyperspell connect failed: {e}")
 
+    # OAuth completion will (eventually) flip this project's connection state.
+    # Bust the 30s cache so /connect/status doesn't lie until it expires.
+    _status_cache.pop(body.projectId, None)
     return ConnectStartResponse(url=url, hyperspell_user_id=user_id)
 
 

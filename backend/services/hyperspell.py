@@ -32,21 +32,26 @@ log = logging.getLogger(__name__)
 
 
 # ─── source-name mapping ──────────────────────────────────────────────────────
+# Live-tested 2026-05-09: Hyperspell exposes 4 providers via integrations.list():
+#   slack, notion, google_drive, github
+# Gmail is NOT a Hyperspell provider (despite our DB enum having it).
+# Keeping `gmail` in the DB enum for forward-compat, but no Hyperspell mapping.
 HS_TO_DB_SOURCE: dict[str, str] = {
     "slack": "slack",
     "google_drive": "drive",
     "notion": "notion",
-    "google_mail": "gmail",
 }
 DB_TO_HS_SOURCE: dict[str, str] = {
     "slack": "slack",
     "drive": "google_drive",
     "notion": "notion",
-    "gmail": "google_mail",
     "github": "github",
+    # NB: 'gmail' deliberately not mapped — Hyperspell doesn't support it yet.
+    # /connect/start raises a 400 with a clear message; frontend surfaces it.
 }
 
 DBSource = Literal["slack", "drive", "notion", "gmail"]
+HYPERSPELL_SUPPORTED_DB_SOURCES: frozenset[str] = frozenset(DB_TO_HS_SOURCE.keys())
 
 
 @dataclass
@@ -117,7 +122,12 @@ def connect_url(
     then calls `client.integrations.connect(uuid, redirect_url=...)` which
     returns `{url, expires_at}`. We hand the URL back; the frontend opens it.
     """
-    provider = DB_TO_HS_SOURCE.get(db_source, db_source)
+    if db_source not in DB_TO_HS_SOURCE:
+        raise ValueError(
+            f"{db_source!r} is not a Hyperspell-supported source. "
+            f"Supported: {sorted(DB_TO_HS_SOURCE.keys())}"
+        )
+    provider = DB_TO_HS_SOURCE[db_source]
     client = get_client(hyperspell_user_id)
     integration_uuid = _resolve_integration_uuid(client, provider)
 
@@ -176,14 +186,17 @@ async def search(
 
     client = get_client(hyperspell_user_id)
 
-    def _do_search() -> list[Any]:
+    def _do_search() -> Any:
         kwargs: dict[str, Any] = {"query": query, "max_results": k}
         if hs_sources:
             kwargs["sources"] = hs_sources
-        result = client.memories.search(**kwargs)
-        return list(result.documents or [])
+        return client.memories.search(**kwargs)
 
-    docs = await asyncio.to_thread(_do_search)
+    raw = await asyncio.to_thread(_do_search)
+    # `raw` is the QueryResult; surface non-fatal per-source errors so demo
+    # operators can see "NoResultsForSource" issues in logs.
+    _log_search_errors(raw, where="search")
+    docs = list(raw.documents or [])
     if not docs:
         return []
 
@@ -307,6 +320,7 @@ async def search_with_answer(
         return client.memories.search(**kwargs)
 
     res = await asyncio.to_thread(_do)
+    _log_search_errors(res, where="search_with_answer")
     hits: list[SearchHit] = []
     for d in (res.documents or []):
         md = getattr(d, "metadata", None)
@@ -495,3 +509,16 @@ def _serialize_status(status: Any) -> dict[str, Any]:
     if hasattr(status, "model_dump"):
         return status.model_dump(mode="json")
     return dict(status)
+
+
+def _log_search_errors(result: Any, *, where: str) -> None:
+    """`QueryResult.errors` carries per-source issues like `NoResultsForSource`
+    or missing-credentials messages. Surface them so they're greppable during demo setup."""
+    errors = getattr(result, "errors", None)
+    if not errors:
+        return
+    for err in errors:
+        if isinstance(err, dict):
+            log.warning("hyperspell.%s: %s — %s", where, err.get("error"), err.get("message"))
+        else:
+            log.warning("hyperspell.%s error: %s", where, err)

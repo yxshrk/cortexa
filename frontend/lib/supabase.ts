@@ -37,11 +37,21 @@ export function authHeaders(): HeadersInit {
 }
 
 // Connector source enums — matches DB `context_source` enum.
+//
+// `unsupported`: source is in our DB schema but Hyperspell doesn't expose it.
+//   /connect/start will 400 — UI should disable the connect button and show a tooltip.
+// `beta`: source exists in Hyperspell but is in beta on our side; we use it in
+//   /plan/generate (code_refs) rather than in the connect flow.
+//
+// Live-tested 2026-05-09: Hyperspell `integrations.list()` returns 4 providers:
+//   slack, notion, google_drive, github. Gmail is not yet supported.
 export const CONNECTORS = [
   { id: "slack", label: "Slack", emoji: "💬" },
   { id: "drive", label: "Drive", emoji: "📄" },
   { id: "notion", label: "Notion", emoji: "📝" },
-  { id: "gmail", label: "Gmail", emoji: "✉️" },
-  { id: "github", label: "GitHub", emoji: "🐙" },
+  { id: "gmail", label: "Gmail", emoji: "✉️", unsupported: true,
+    tooltip: "Hyperspell doesn't expose Gmail yet — coming soon." },
+  { id: "github", label: "GitHub", emoji: "🐙", beta: true,
+    tooltip: "Used for code references in /plan/generate, not as a connect-flow source." },
 ] as const;
 export type ConnectorId = (typeof CONNECTORS)[number]["id"];

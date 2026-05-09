@@ -217,12 +217,31 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
             );
           })}
         </ul>
-        <button
-          onClick={() => startConnect(selectedSource)}
-          className="mt-3 w-full rounded-lg border border-dashed border-ink-200 px-3 py-2 text-sm text-ink-400 hover:text-ink-900 hover:border-ink-400"
-        >
-          + Connect {CONNECTORS.find((c) => c.id === selectedSource)?.label}
-        </button>
+        {(() => {
+          const c = CONNECTORS.find((x) => x.id === selectedSource);
+          // `unsupported` (e.g. gmail) — Hyperspell doesn't expose it.
+          // `beta` (e.g. github) — used for code_refs in /plan/generate, not the connect flow.
+          const disabled = c && ("unsupported" in c || "beta" in c);
+          const tooltip =
+            c && "tooltip" in c && typeof c.tooltip === "string" ? c.tooltip : undefined;
+          return (
+            <button
+              onClick={() => startConnect(selectedSource)}
+              disabled={disabled}
+              title={tooltip}
+              className={
+                "mt-3 w-full rounded-lg border border-dashed px-3 py-2 text-sm transition " +
+                (disabled
+                  ? "border-ink-200 text-ink-400 cursor-not-allowed opacity-60"
+                  : "border-ink-200 text-ink-400 hover:text-ink-900 hover:border-ink-400")
+              }
+            >
+              {disabled
+                ? `${c?.label} — ${("unsupported" in (c ?? {})) ? "not supported by Hyperspell" : "beta (used in plan generation)"}`
+                : `+ Connect ${c?.label}`}
+            </button>
+          );
+        })()}
       </aside>
 
       {/* Column 2 — Documents */}
