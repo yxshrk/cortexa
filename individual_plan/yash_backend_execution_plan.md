@@ -8,10 +8,12 @@ You also own the seed corpus content and the demo-day fallback fixtures (paired 
 
 ## Key Changes
 
-- Stand up FastAPI with six routes:
+- Stand up FastAPI with eight routes:
   - `POST /rt/token` — proxy to `https://api.openai.com/v1/realtime/client_secrets`. Return `{ value, expires_at }` flat. Public.
   - `GET /context/briefing?projectId=X` — assemble briefing from last 7 days of `meeting_notes` + `project_context`, plus fresh Hyperspell latest design docs / active files. Cache per `(projectId, day)`. Public.
   - `POST /context/query` — sub-1s. Stage 1: pgvector cosine over `meeting_notes` + `project_context` via Supabase RPC `search_context`. Stage 2: Hyperspell live with 500ms timeout, merged best-effort. 60s same-query cache. Public.
+  - `POST /connect/start` — `{ projectId, source }` → Hyperspell connect URL for OAuth. Frontend opens it in a new tab. Lazily provisions `projects.hyperspell_user_id` (e.g. `pri-<projectId>`) on first call. Public.
+  - `GET /connect/status?projectId=X` — `{ slack, drive, notion, gmail, github: "connected"|"not_connected"|"beta" }`. Computed from Hyperspell `connections.list()` if available; falls back to a heuristic over `project_context` (presence of any row from a source ⇒ connected). 30s in-memory cache. Public.
   - `POST /ingest/hyperspell` — Hyperspell search across Slack/Drive/Notion/Gmail, embed each item with `text-embedding-3-small`, UPSERT `project_context` (dedup on `(project_id, source, external_id)` or `content_hash`). Auth-gated.
   - `POST /plan/generate` — the linear pipeline. Synthesize → categorize → per-item Hyperspell GitHub → action drafts. Wrapped in `generation_runs` with `(project_id, week_start, idempotency_key)` unique key. REPLACE `plan_items` for the doc on rerun (cascades to `generated_actions`). Auth-gated.
   - `POST /actions/{id}/execute` — dispatch to Linear / GitHub / Devin. UPDATE `external_url` + `status`. Auth-gated.

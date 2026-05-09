@@ -32,9 +32,16 @@ cortexa/
 │   ├── README.md
 │   └── fixtures/seed_code_refs.json                Hyperspell GitHub fallback
 ├── frontend/                                       Jin's Next.js + Yudong's voice agent
-│   └── README.md
+│   ├── README.md
+│   ├── package.json, tsconfig.json, etc.
+│   ├── app/                                         pages + API routes
+│   ├── lib/supabase.ts
+│   └── .env.local.example
 ├── supabase/
 │   └── migration_to_v2.sql                         paste-and-run schema migration
+├── docs/                                            external-system knowledge dumps
+│   ├── README.md
+│   └── hyperspell.md                                connectors, SDKs, source enum mapping
 └── demo/                                           Yudong's standup script + fallback video
     └── README.md
 ```
