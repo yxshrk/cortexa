@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     demo_token: str = Field(alias="DEMO_TOKEN")
 
     # External APIs (some may be unset early; routes that need them will fail loudly)
-    openai_key: str | None = Field(default=None, alias="OPENAI_KEY")
+    openai_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_KEY", "OPENAI_API_KEY", "OPENAI_API"),
+    )
     anthropic_key: str | None = Field(default=None, alias="ANTHROPIC_KEY")
     hyperspell_key: str | None = Field(default=None, alias="HYPERSPELL_KEY")
     linear_token: str | None = Field(default=None, alias="LINEAR_TOKEN")

@@ -21,12 +21,19 @@ type ProjectContext = {
 
 type ConnStatus = "connected" | "not_connected" | "beta";
 
+type IngestResult =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "ok"; upserted: number; inserted: number; updated: number; sources: Record<string, number>; sourceErrors: Record<string, string>; writeErrors: number; at: number }
+  | { kind: "error"; status?: number; message: string; at: number };
+
 export default function ConnectorsTab({ projectId }: { projectId: string }) {
   const [statuses, setStatuses] = useState<Record<string, ConnStatus> | null>(null);
   const [docs, setDocs] = useState<ProjectContext[]>([]);
   const [selectedSource, setSelectedSource] = useState<ConnectorId>("slack");
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ingestResult, setIngestResult] = useState<IngestResult>({ kind: "idle" });
 
   // Initial load + realtime subscription on project_context
   useEffect(() => {
@@ -94,15 +101,73 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   async function refreshIngest() {
     if (ingestInFlight.current) return;
     ingestInFlight.current = true;
+    setIngestResult({ kind: "running" });
     try {
-      await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
+      const r = await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ projectId }),
       });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        setIngestResult({
+          kind: "error",
+          status: r.status,
+          message: extractErrorMessage(text) || r.statusText || "Unknown error",
+          at: Date.now(),
+        });
+        return;
+      }
+      const body = await r.json();
+      setIngestResult({
+        kind: "ok",
+        upserted: body.upserted ?? 0,
+        inserted: body.inserted ?? 0,
+        updated: body.updated ?? 0,
+        sources: body.by_source ?? {},
+        sourceErrors: body.errors ?? {},
+        writeErrors: body.write_errors ?? 0,
+        at: Date.now(),
+      });
+    } catch (e) {
+      setIngestResult({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+        at: Date.now(),
+      });
     } finally {
       ingestInFlight.current = false;
     }
+  }
+
+  // FastAPI errors come back as `{"detail": "..."}` (or `{"detail": [...]}` for
+  // pydantic validation). Pull the human string out so the banner doesn't show
+  // raw JSON to the user.
+  function extractErrorMessage(text: string): string {
+    if (!text) return "";
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") return parsed;
+      if (parsed && typeof parsed === "object") {
+        const detail = (parsed as { detail?: unknown }).detail;
+        if (typeof detail === "string") return detail;
+        if (Array.isArray(detail)) {
+          return detail
+            .map((d) =>
+              typeof d === "string"
+                ? d
+                : (d as { msg?: string })?.msg ?? JSON.stringify(d),
+            )
+            .join("; ");
+        }
+        if (detail && typeof detail === "object") {
+          return (detail as { message?: string }).message ?? JSON.stringify(detail);
+        }
+      }
+    } catch {
+      /* not JSON */
+    }
+    return text.slice(0, 240);
   }
 
   async function startConnect(source: ConnectorId) {
@@ -174,7 +239,9 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="grid grid-cols-12 gap-4 min-h-[calc(100vh-180px)]">
+    <div className="space-y-3">
+      <IngestBanner result={ingestResult} onDismiss={() => setIngestResult({ kind: "idle" })} />
+    <div className="grid grid-cols-12 gap-4 min-h-[calc(100vh-320px)]">
       {/* Column 1 — Connectors */}
       <aside className="col-span-3 rounded-xl border border-ink-200 bg-white p-3">
         <div className="flex items-center justify-between mb-2 px-1">
@@ -326,7 +393,82 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         )}
       </aside>
     </div>
+    </div>
   );
+}
+
+function IngestBanner({ result, onDismiss }: { result: IngestResult; onDismiss: () => void }) {
+  if (result.kind === "idle") return null;
+  if (result.kind === "running") {
+    return (
+      <div className="rounded-md border border-ink-200 bg-ink-50 px-3 py-1.5 text-xs text-ink-600">
+        Pulling from Hyperspell…
+      </div>
+    );
+  }
+  if (result.kind === "error") {
+    const headline = (() => {
+      if (result.status === 401) return "Backend rejected demo token";
+      if (result.status === 404) return "Project not found";
+      if (result.status && result.status >= 500) return "Backend error";
+      if (result.status) return `Ingest failed (${result.status})`;
+      return "Couldn't reach backend";
+    })();
+    const hint = (() => {
+      if (result.status === 401)
+        return `Set NEXT_PUBLIC_DEMO_TOKEN to match the backend's DEMO_TOKEN, then reload.`;
+      if (result.status === 404) return null;
+      if (result.status && result.status >= 500) return null;
+      if (!result.status) return `Is the backend up at ${getFastApiOrigin()}?`;
+      return null;
+    })();
+    return (
+      <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-800 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <span className="font-medium">{headline}.</span>{" "}
+          <span className="opacity-80 break-words">{result.message}</span>
+          {hint && <span className="opacity-60"> · {hint}</span>}
+        </div>
+        <button onClick={onDismiss} className="text-rose-700 hover:opacity-70 shrink-0" aria-label="Dismiss">×</button>
+      </div>
+    );
+  }
+  // ok
+  const sourceErrors = Object.entries(result.sourceErrors);
+  const sourceCounts = Object.entries(result.sources);
+  const hasIssues = sourceErrors.length > 0 || result.writeErrors > 0;
+  const tone = hasIssues
+    ? "border-amber-200 bg-amber-50 text-amber-900"
+    : "border-emerald-200 bg-emerald-50 text-emerald-900";
+  return (
+    <div className={`rounded-md border ${tone} px-3 py-1.5 text-xs flex items-start justify-between gap-3`}>
+      <div className="min-w-0">
+        <span className="font-medium">
+          Synced {result.upserted} item{result.upserted === 1 ? "" : "s"}
+          {result.upserted > 0 && ` (${result.inserted} new, ${result.updated} updated)`}.
+        </span>
+        {sourceCounts.length > 0 && (
+          <span className="opacity-80"> · {sourceCounts.map(([s, n]) => `${s} ${n}`).join(", ")}</span>
+        )}
+        {sourceErrors.length > 0 && (
+          <span className="opacity-80">
+            {" · "}
+            issues: {sourceErrors.map(([s, msg]) => `${s} (${msg.split(":")[0]})`).join(", ")}
+          </span>
+        )}
+        {result.writeErrors > 0 && <span className="opacity-80"> · {result.writeErrors} write error{result.writeErrors === 1 ? "" : "s"}</span>}
+      </div>
+      <button onClick={onDismiss} className="hover:opacity-70 shrink-0" aria-label="Dismiss">×</button>
+    </div>
+  );
+}
+
+function getFastApiOrigin(): string {
+  try {
+    return new URL(FASTAPI_URL).origin;
+  } catch {
+    return FASTAPI_URL;
+  }
 }
 
 function StatusPill({ status, dark }: { status: ConnStatus; dark: boolean }) {

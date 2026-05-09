@@ -9,7 +9,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import connect, ingest, memories, search
+from routers import actions, connect, context, ingest, memories, plan, realtime, search
 from settings import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -26,9 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(actions.router)
 app.include_router(connect.router)
+app.include_router(context.router)
 app.include_router(ingest.router)
 app.include_router(memories.router)
+app.include_router(plan.router)
+app.include_router(realtime.router)
 app.include_router(search.router)
 
 
