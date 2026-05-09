@@ -1,39 +1,102 @@
 """Thin wrappers for the small handful of Supabase writes the backend does."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 from supabase import Client
+
+log = logging.getLogger(__name__)
 
 
 def upsert_project_context(
     sb: Client,
     rows: Iterable[dict[str, Any]],
-    *,
-    on_conflict: str = "project_id,source,external_id",
 ) -> dict[str, int]:
-    """Bulk UPSERT into project_context. Idempotent on the conflict target.
+    """Idempotent upsert into project_context.
 
-    Returns counts. Splits rows by available conflict key when external_id is null.
+    The schema has TWO partial unique indexes:
+        (project_id, source, external_id) WHERE external_id IS NOT NULL
+        (project_id, source, content_hash) WHERE content_hash IS NOT NULL
+
+    PostgREST/Supabase ``upsert(on_conflict=...)`` cannot reliably target a
+    partial unique index by column list — and even when it can, a row that
+    carries BOTH an external_id and a content_hash can still collide on the
+    second index when the sender retries with the same body. We therefore
+    do explicit select-then-update-or-insert per row:
+
+        1. If external_id is set, look up by (project_id, source, external_id).
+           Found → UPDATE that row's content fields.
+        2. Else look up by (project_id, source, content_hash).
+           Found → UPDATE that row.
+        3. Otherwise INSERT.
+
+    Returns counts: ``{"inserted", "updated", "errors"}``.
     """
     rows = list(rows)
+    counts = {"inserted": 0, "updated": 0, "errors": 0}
     if not rows:
-        return {"with_external": 0, "with_hash": 0}
+        return counts
 
-    with_ext = [r for r in rows if r.get("external_id")]
-    no_ext = [r for r in rows if not r.get("external_id")]
+    for row in rows:
+        try:
+            existing_id = _find_existing_id(sb, row)
+            if existing_id:
+                update_payload = {k: v for k, v in row.items() if k != "project_id"}
+                sb.table("project_context").update(update_payload).eq(
+                    "id", existing_id
+                ).execute()
+                counts["updated"] += 1
+            else:
+                sb.table("project_context").insert(row).execute()
+                counts["inserted"] += 1
+        except Exception as e:  # noqa: BLE001 — best-effort per-row, keep batch alive
+            counts["errors"] += 1
+            log.warning(
+                "project_context upsert row failed (project=%s source=%s ext=%s): %s",
+                row.get("project_id"),
+                row.get("source"),
+                row.get("external_id"),
+                e,
+            )
 
-    if with_ext:
-        sb.table("project_context").upsert(
-            with_ext, on_conflict="project_id,source,external_id"
-        ).execute()
-    if no_ext:
-        # rows lacking external_id dedupe via content_hash
-        sb.table("project_context").upsert(
-            no_ext, on_conflict="project_id,source,content_hash"
-        ).execute()
+    return counts
 
-    return {"with_external": len(with_ext), "with_hash": len(no_ext)}
+
+def _find_existing_id(sb: Client, row: dict[str, Any]) -> str | None:
+    """Look up a matching project_context row id, preferring external_id."""
+    project_id = row["project_id"]
+    source = row["source"]
+    external_id = row.get("external_id")
+    content_hash = row.get("content_hash")
+
+    if external_id:
+        r = (
+            sb.table("project_context")
+            .select("id")
+            .eq("project_id", project_id)
+            .eq("source", source)
+            .eq("external_id", external_id)
+            .limit(1)
+            .execute()
+        )
+        if r.data:
+            return r.data[0]["id"]
+
+    if content_hash:
+        r = (
+            sb.table("project_context")
+            .select("id")
+            .eq("project_id", project_id)
+            .eq("source", source)
+            .eq("content_hash", content_hash)
+            .limit(1)
+            .execute()
+        )
+        if r.data:
+            return r.data[0]["id"]
+
+    return None
 
 
 def get_project(sb: Client, project_id: str) -> dict[str, Any] | None:
