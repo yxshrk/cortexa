@@ -98,6 +98,48 @@ That's the entire system.
 
 **Read this top to bottom**: browser at the top, two backends at the bottom (Supabase for state, FastAPI for orchestration). Two write paths into Supabase: Yudong from the browser via anon key (only on `knowledge_entries`); Yash from FastAPI via service-role key (any table). Reads are all realtime subscriptions from Jin's panels.
 
+### 2.1 Dynamic context (live RAG during the meeting)
+
+The briefing is fetched once at meeting start. While the meeting runs, the model itself can pull *more* context whenever it hears a topic worth looking up — using OpenAI Realtime's tool-calling.
+
+```
+   while meeting is running…
+
+   transcript: "...rate-limit middleware needs cleanup..."
+                            │
+                            ▼
+   OpenAI Realtime decides to use a tool
+                            │
+                            ▼
+   data channel: response.function_call_arguments.done
+       { name: "search_project_context",
+         arguments: { query: "rate-limit middleware" } }
+                            │
+                            ▼
+   Yudong's tool handler:
+       POST {FASTAPI}/context/query
+            { projectId, query, k: 6 }
+                            │
+                            ▼
+   Yash's endpoint:
+       • Postgres ILIKE on knowledge_entries (last 30d)
+       • Hyperspell live search (all sources)
+       • merge + dedupe + rank → top k
+                            │
+                            ▼
+   Yudong returns to Realtime via conversation.item.create:
+       { type: "function_call_output",
+         output: <ContextItem[] serialized> }
+                            │
+                            ▼
+   model resumes with grounded context. Yudong's summarizer
+   downstream produces a sharper note like:
+   "PR #42 is a half-done refactor of rate-limit middleware —
+    overlaps with this discussion."
+```
+
+The model degrades gracefully: if `/context/query` fails or tool calling misbehaves, the agent still produces notes from the static briefing. The dynamic layer is additive.
+
 ---
 
 ## 3. The Three Roles
@@ -179,6 +221,62 @@ dc.send(JSON.stringify({
 }));
 ```
 
+#### C-bis. Live tool-calling (dynamic RAG, see §2.1)
+
+The briefing alone is not enough — the agent should pull more context *as it hears things*. Configure the Realtime session with one tool:
+
+```ts
+const TOOLS = [{
+  type: "function",
+  name: "search_project_context",
+  description: "Search this project's knowledge base for files, decisions, or threads relevant to a topic the team is discussing right now. Use whenever you hear a filename, person, feature, bug, or technical decision worth grounding.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "the topic, file, or person to look up" }
+    },
+    required: ["query"]
+  }
+}];
+
+dc.send(JSON.stringify({
+  type: "session.update",
+  session: { instructions: BRIEFING_PROMPT, tools: TOOLS, tool_choice: "auto" }
+}));
+```
+
+Tool handler in your component (one event listener on the data channel):
+
+```ts
+dc.addEventListener("message", async (e) => {
+  const ev = JSON.parse(e.data);
+  if (ev.type === "response.function_call_arguments.done"
+      && ev.name === "search_project_context") {
+    const { query } = JSON.parse(ev.arguments);
+
+    const items = await fetch(`${FASTAPI}/context/query`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId, query, k: 6 }),
+    }).then(r => r.json()).catch(() => []);  // fail soft
+
+    dc.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: ev.call_id,
+        output: JSON.stringify(items),
+      },
+    }));
+    dc.send(JSON.stringify({ type: "response.create" }));
+  }
+});
+```
+
+The model will use the returned items in its next transcript output, which then flows to your summarizer with richer references. The summarizer prompt should mention: *"if the transcript references items you previously looked up, cite them in `refs_to`."*
+
+This is the "agent searching your codebase as people talk" moment in the demo.
+
 #### C. The summarizer route (Yudong owns this entirely)
 
 ```ts
@@ -234,6 +332,7 @@ for (const note of notes) {
 - 12:30pm — Tab+mic mixer working; `/api/voice/summarize` route returns structured notes from a hardcoded chunk.
 - 1:30pm — Briefing fetched and rendered; passed to summarizer.
 - 2:30pm — Notes flowing end-to-end: mic → Realtime → summarizer → Supabase → Jin's Knowledge tab.
+- 3:00pm — Live tool-calling working: model invokes `search_project_context`, your handler fetches Yash's `/context/query`, returns to model, summarizer note cites the fetched item.
 - 5:00pm — Demo timed at ≤90s, run cleanly twice.
 
 ---
@@ -316,7 +415,8 @@ Heaviest role. Owns FastAPI surface, Hyperspell, Claude categorizer, executors, 
 | Method | Path | Caller | Purpose |
 |---|---|---|---|
 | POST | `/rt/token` | Yudong | mint OpenAI Realtime ephemeral token |
-| GET  | `/context/briefing?projectId=X` | Yudong | assemble briefing from Hyperspell + last 7d entries |
+| GET  | `/context/briefing?projectId=X` | Yudong (once on meeting start) | assemble briefing from Hyperspell + last 7d entries |
+| POST | `/context/query` | Yudong's tool handler (live during meeting) | merged Hyperspell + DB search; sub-1s latency |
 | POST | `/ingest/hyperspell` | Jin button + 5min cron | search Hyperspell, INSERT into `knowledge_entries` (dedup by `ref_url`) |
 | POST | `/categorize` | Jin button (also auto on meeting end) | Claude over weekly doc → INSERT `categorized_items` + `generated_actions` |
 | POST | `/actions/{id}/execute` | Jin button | dispatch to Linear/GitHub/Devin, UPDATE `external_url`, `status` |
@@ -343,6 +443,14 @@ Heaviest role. Owns FastAPI surface, Hyperspell, Claude categorizer, executors, 
    *(Stretch: replace this with a Tensorlake job to add Tensorlake as a 5th sponsor.)*
 
 5. **No `/voice/append`** — Yudong writes voice notes directly to Supabase via the anon key. Yash never sees individual transcript chunks. Less coupling, fewer endpoints.
+
+6. **`/context/query` (live RAG, called from Yudong's tool handler during the meeting)** —
+   - Input: `{projectId, query, k?=6}`.
+   - Postgres `ILIKE` search on `knowledge_entries.content` (last 30d, project-scoped) → top `k/2`.
+   - Live `hyperspell.memories.search(query, sources=all, k=k/2)`.
+   - Merge + dedupe by `ref_url`. Score-sort. Return as `ContextItem[]` (same shape as briefing items).
+   - **Sub-1s latency target** — this fires during meetings; > 2s and the model gives up.
+   - Cache same-query repeats for 60s in process memory to avoid hammering Hyperspell.
 
 **Files**
 
@@ -372,6 +480,7 @@ backend/
 - Night before: Hyperspell connectors live + corpus ingested + verified search returns expected items.
 - 11:00am: FastAPI running, `/rt/token` + `/context/briefing` return real data.
 - 1:00pm: `/ingest/hyperspell` works; Jin's Knowledge tab populates.
+- 2:00pm: `/context/query` returns merged results in <1s — test with curl using a few sample queries.
 - 3:00pm: `/categorize` returns valid Claude output; Insights + Actions tabs populate.
 - 4:00pm: APScheduler cron live; verify `/ingest/hyperspell` re-runs every 5 min.
 - 5:00pm: `/actions/{id}/execute` creates real Linear tickets.
@@ -431,6 +540,8 @@ Jin mounts it once inside the Knowledge tab. **No callbacks back into the page**
 |---|---|
 | Schema change needed | Yash → Jin |
 | Briefing schema needs a new field | Yudong → Yash |
+| `/context/query` response shape needs adjustment | Yudong → Yash |
+| `/context/query` is slower than 1s | Yash → Yudong (decide: lower `k`, drop a source, or cache more aggressively) |
 | Hyperspell isn't returning expected items | Yash → Yudong (corpus may need adjustment) |
 | Voice notes come out generic | Yudong tunes his summarizer prompt; loops Yash in only if it's a briefing data issue |
 | Vercel env var missing | Jin → Yash |
@@ -567,6 +678,31 @@ POST {FASTAPI}/categorize    { "projectId": "<uuid>" }
 POST {FASTAPI}/actions/{actionId}/execute
 → 200 OK   { "externalUrl": "https://linear.app/.../ABC-42" }
 ```
+
+### 5.8 `/context/query` (Yudong's Realtime tool handler → Yash)
+
+Called **during** the meeting, on demand from the model. Sub-1s latency required.
+
+```http
+POST {FASTAPI}/context/query
+{ "projectId": "<uuid>", "query": "string", "k": 6 }
+
+→ 200 OK
+[
+  {
+    "source": "voice|slack|drive|notion|github|gmail",
+    "title": "string",
+    "snippet": "string ≤200",
+    "url": "string|null",
+    "ts": "string|null",
+    "score": 0.0,
+    "code_path": "string|null",
+    "code_lines": "string|null"
+  }
+]
+```
+
+Yudong's handler returns this array as a `function_call_output` to OpenAI Realtime via the data channel. The model uses it in subsequent transcript output.
 
 ---
 
@@ -818,6 +954,8 @@ Idempotent because `/ingest/hyperspell` dedups on `(project_id, source, ref_url)
 | Linear / GitHub action fails live | Pre-create projects + tokens validated at 4pm. Skip live execution → show the polished draft. |
 | Anon-key INSERT denied by RLS | Test from a clean browser at 11:30am. The `anon_insert_voice` policy must be applied. |
 | Cron job fires during demo and creates noise | Disable `hs_ingest` job at 5:55pm: `scheduler.pause_job("hs_ingest")`. |
+| Realtime tool calling misbehaves (model never calls; or call hangs) | Static briefing alone still produces good notes. If tools are clearly broken at 4pm, set `tool_choice: "none"` and ship without dynamic RAG. The plan still demos cleanly. |
+| `/context/query` > 1s | Cache same-query for 60s; reduce `k`; drop the Hyperspell call and rely on Postgres-only as a 200ms fallback. |
 | Demo over 3 minutes | Yudong is the timer. Cut intro, not demo. |
 | FastAPI not reachable from Vercel | ngrok stable URL baked into `NEXT_PUBLIC_FASTAPI_URL`. Test from Vercel preview at 5:00pm. |
 
@@ -867,4 +1005,4 @@ Idempotent because `/ingest/hyperspell` dedups on `(project_id, source, ref_url)
 
 ## 14. One-line summary for the judges
 
-> *Project Brain keeps a per-project weekly knowledge document. A voice agent listens to your meetings, Hyperspell pulls in your Slack/docs/code on a 5-minute cron, and Claude turns the doc into bug fixes, features, and improvements you can ship straight to Linear, GitHub, or Devin.*
+> *Project Brain keeps a per-project weekly knowledge document. A voice agent listens to your meetings — and pulls relevant Hyperspell context live as people talk — while a 5-minute cron keeps Slack/docs/code in sync. Claude turns the doc into bug fixes, features, and improvements you can ship straight to Linear, GitHub, or Devin.*
