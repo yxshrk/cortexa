@@ -148,7 +148,7 @@ Five core tables, one flow. Inputs are continuous (voice agent + 5min Hyperspell
                                   Jin's UI lights up via realtime
 ```
 
-**Idempotency**: `/plan/generate` is wrapped in a `generation_runs` row keyed by `(project_id, week_start)`. Concurrent calls return 409 with the running run id. On success, prior `plan_items` for the same `knowledge_document_id` are deleted in a transaction before new ones are inserted (cascades through `generated_actions`).
+**Idempotency**: `/plan/generate` is wrapped in a `generation_runs` row. The schema enforces at most **one active run** (`status in ('queued','running')`) per `(project_id, week_start)` via a partial unique index — concurrent calls trip the index and the second one returns 409 with the running run id. On success, prior `plan_items` for the same `knowledge_document_id` are deleted in a transaction before new ones are inserted (cascades through `generated_actions`).
 
 ### 2.2 Dynamic context (live RAG during the meeting)
 
@@ -253,7 +253,11 @@ dc.send(JSON.stringify({
     instructions: BRIEFING_PROMPT,
     audio: {
       input: {
-        transcription: { model: "gpt-realtime-whisper" },
+        // OpenAI's current transcription models for Realtime:
+        //   gpt-4o-mini-transcribe (fast, recommended for live)
+        //   gpt-4o-transcribe (higher quality, slightly slower)
+        //   whisper-1, gpt-4o-transcribe-latest also work
+        transcription: { model: "gpt-4o-mini-transcribe" },
         turn_detection: { type: "server_vad", silence_duration_ms: 800 },
       },
     },
@@ -931,6 +935,10 @@ create table generation_runs (
 );
 create unique index on generation_runs (project_id, week_start, idempotency_key) where idempotency_key is not null;
 create index on generation_runs (project_id, created_at desc);
+-- Hard idempotency: at most ONE active run per (project_id, week_start) at a time.
+-- Concurrent /plan/generate calls trip this index → second one returns 409.
+create unique index generation_runs_one_active_uniq on generation_runs (project_id, week_start)
+  where status in ('queued','running');
 
 -- CATEGORIZED: plan items
 create type plan_item_category as enum ('bug_fix','new_feature','maintenance');
@@ -1034,7 +1042,13 @@ create policy anon_insert_tc on meeting_transcript_chunks
 
 -- Service role bypasses RLS automatically.
 
--- Required grants for anon to use the RPC:
+-- Postgres requires base table privileges in addition to RLS policies.
+grant select on meeting_notes, meeting_transcript_chunks, project_context,
+                knowledge_documents, plan_items, generated_actions,
+                generation_runs, projects, meetings to anon, authenticated;
+grant insert on meeting_notes, meeting_transcript_chunks to anon, authenticated;
+
+-- Required grant for anon to use the RPC:
 grant execute on function search_context(uuid, vector, int) to anon, authenticated;
 ```
 

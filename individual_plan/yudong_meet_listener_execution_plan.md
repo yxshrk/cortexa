@@ -28,14 +28,33 @@ Your core path captures meeting audio, transcribes it with OpenAI Realtime, summ
 ## Implementation Details
 
 - Audio capture:
-  - Use `navigator.mediaDevices.getDisplayMedia({ audio: true, video: false })`.
+  - **`getDisplayMedia` REQUIRES a video track per spec — passing `video: false` throws TypeError.** Request video, immediately stop and remove the video track, keep the audio track.
+    ```ts
+    const display = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "browser" },
+      audio: { echoCancellation: false, noiseSuppression: false },
+    });
+    display.getVideoTracks().forEach(t => { t.stop(); display.removeTrack(t); });
+    if (display.getAudioTracks().length === 0) throw new Error("TAB_AUDIO_MISSING");
+    ```
   - User selects the Google Meet tab and checks **Share tab audio**.
   - Use `navigator.mediaDevices.getUserMedia({ audio: true })` for local mic.
   - Mix both streams with `AudioContext` and `MediaStreamDestination`.
+  - On `TAB_AUDIO_MISSING`, surface a toast and fall back to mic-only.
 - Realtime transcription:
-  - Call `POST {FASTAPI}/rt/token` for OpenAI ephemeral token.
+  - Call `POST {FASTAPI}/rt/token` for OpenAI ephemeral token. Frozen response shape: `{ value, expires_at }`. Use `body.value` directly as the WebRTC bearer.
   - Create `RTCPeerConnection`, add the mixed audio track, and listen on `RTCDataChannel`.
-  - Send `session.update` with project briefing terms and the `search_project_context` tool.
+  - Send `session.update` with project briefing terms, the `search_project_context` tool, AND explicit transcription config (otherwise no events fire):
+    ```ts
+    audio: {
+      input: {
+        transcription: { model: "gpt-4o-mini-transcribe" },  // not "gpt-realtime-whisper"
+        turn_detection: { type: "server_vad", silence_duration_ms: 800 },
+      },
+    },
+    ```
+    Available transcription models: `gpt-4o-mini-transcribe` (fast, recommended), `gpt-4o-transcribe` (quality), `whisper-1`, `gpt-4o-transcribe-latest`.
+  - Listen for `conversation.item.input_audio_transcription.delta` and `.completed` on the data channel.
 - Summarization:
   - Add `POST /api/voice/summarize` in Next.js.
   - Input: `{ transcript_chunk, briefing }`.

@@ -163,6 +163,10 @@ create table generation_runs (
 );
 create unique index generation_runs_idem_uniq on generation_runs (project_id, week_start, idempotency_key) where idempotency_key is not null;
 create index        generation_runs_project_idx on generation_runs (project_id, created_at desc);
+-- Hard idempotency: only ONE active run per (project_id, week_start) at a time.
+-- Concurrent /plan/generate calls trip this index and the second one gets 409.
+create unique index generation_runs_one_active_uniq on generation_runs (project_id, week_start)
+  where status in ('queued','running');
 
 -- 10) CATEGORIZED: plan_items (replaces categorized_items) --------------------
 
@@ -290,7 +294,32 @@ exception when duplicate_object then null; end $$;
 
 -- service role bypasses RLS automatically (Yash's backend)
 
--- 15) Grants for the RPC ------------------------------------------------------
+-- 15) Table privileges --------------------------------------------------------
+-- RLS policies are checked AFTER base privileges. Postgres requires anon to
+-- have SELECT/INSERT granted on the table before policies even run.
+-- (Supabase's own Realtime + RLS guide does this explicitly.)
+
+grant select on meeting_notes              to anon;
+grant select on meeting_transcript_chunks  to anon;
+grant select on project_context            to anon;
+grant select on knowledge_documents        to anon;
+grant select on plan_items                 to anon;
+grant select on generated_actions          to anon;
+grant select on generation_runs            to anon;
+grant select on projects                   to anon;
+grant select on meetings                   to anon;
+
+-- Anon may INSERT only on the two voice-agent tables (RLS policy further restricts via WITH CHECK).
+grant insert on meeting_notes              to anon;
+grant insert on meeting_transcript_chunks  to anon;
+
+-- Same grants for authenticated role so signed-in users would still work post-hackathon.
+grant select on meeting_notes, meeting_transcript_chunks, project_context,
+                knowledge_documents, plan_items, generated_actions,
+                generation_runs, projects, meetings to authenticated;
+grant insert on meeting_notes, meeting_transcript_chunks to authenticated;
+
+-- 16) RPC execute -------------------------------------------------------------
 
 grant execute on function search_context(uuid, vector, int) to anon, authenticated;
 

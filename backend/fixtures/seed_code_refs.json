@@ -1,0 +1,37 @@
+{
+  "_comment": "Demo-day fallback for Hyperspell GitHub. Used by services/code_refs.py when HYPERSPELL_GITHUB_AVAILABLE is False. Each entry is keyed by a substring matched against the categorizer's `code_query`. Yash + Yudong pair on the actual snippet content tonight.",
+
+  "rate-limit middleware": [
+    {
+      "path": "src/middleware/rateLimit.ts",
+      "lines": "12-34",
+      "snippet": "// TODO(yudong): refactor — windowed counter doesn't survive instance restart\nexport const rateLimit = (req: Request) => {\n  const key = req.ip;\n  const count = WINDOW.get(key) ?? 0;\n  // ... half-finished refactor in PR #42\n}"
+    },
+    {
+      "path": "src/middleware/rateLimit.test.ts",
+      "lines": "1-18",
+      "snippet": "describe('rateLimit', () => {\n  it.todo('persists across restarts');\n  it.todo('handles burst correctly');\n});"
+    }
+  ],
+
+  "Safari login": [
+    {
+      "path": "src/auth/redirect.ts",
+      "lines": "44-67",
+      "snippet": "export function handleAuthRedirect(req: Request) {\n  // Safari-specific cookie quirk: SameSite=None requires Secure\n  const cookie = req.headers.get('cookie');\n  // ... known to fail when redirect chain crosses subdomain\n}"
+    }
+  ],
+
+  "CSV export": [
+    {
+      "path": "src/api/export/csv.ts",
+      "lines": "1-22",
+      "snippet": "// CSV export v1 — slated for replacement per design doc 'CSV export v2'\nexport async function exportCsv(query: ExportQuery) {\n  const rows = await db.fetch(query);\n  return rows.map(toCsvRow).join('\\n');\n}"
+    },
+    {
+      "path": "src/api/export/types.ts",
+      "lines": "5-15",
+      "snippet": "export type ExportQuery = {\n  filters: Record<string, string>;\n  // v2 will add: cursor, format, columns selection\n};"
+    }
+  ]
+}
