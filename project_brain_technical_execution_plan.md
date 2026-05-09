@@ -39,6 +39,7 @@ Five tables, one flow. Inputs are continuous (voice agent + 5min Hyperspell cron
 | Live meeting capture | **OpenAI Realtime API** (WebRTC) | ✅ | Yudong |
 | Database + realtime | **Supabase** (Postgres + Realtime + RLS) | — | Jin (with Yash) |
 | Frontend | **Next.js** (App Router) on **Vercel** | ✅ | Jin (page) + Yudong (voice agent) |
+| Live context diagram | **React Flow** (`@xyflow/react`) | — | Yudong |
 | Backend orchestration | **FastAPI** (Python) + APScheduler | — | Yash |
 | Synthesis + categorization LLM | **Claude Sonnet 4.6** | — | Yash |
 | Voice summarizer | **GPT-4.1** (Next.js route handler) | — | Yudong |
@@ -61,6 +62,7 @@ Five tables, one flow. Inputs are continuous (voice agent + 5min Hyperspell cron
 │   │                                                                    │  │
 │   │   📥 Inputs                                                        │  │
 │   │     ▸ Meetings           ── <VoiceAgent /> (Yudong)               │  │
+│   │                              + live React Flow context board      │  │
 │   │                              + list of past meetings with notes   │  │
 │   │                                                                    │  │
 │   │     ▸ Project Context    ── grouped by Slack/Drive/Notion/Gmail   │  │
@@ -190,6 +192,9 @@ While running:
        │
        ▼
    return as function_call_output → model uses for richer transcript
+       │
+       ▼
+   update React Flow context board inside VoiceAgent
 ```
 
 #### A. Joining meetings
@@ -297,6 +302,15 @@ for (const n of notes) {
 }
 ```
 
+#### E. Live React Flow context board (Yudong-owned)
+
+Inside `VoiceAgent`, render a compact live context board fed by the same `/context/query` results used for Realtime tool-calling. This board is a meeting aid, not a persisted pipeline table: it helps the screen-shared UI show what repo/project context the discussion is touching in the moment.
+
+- Use `@xyflow/react`.
+- Keep the board inside the `VoiceAgent` component boundary so Jin does not need callbacks or page-level state.
+- Convert each `ContextItem` into a source node and connect it to the current query/topic node.
+- Preserve the last useful board if `/context/query` fails; do not block meeting note insertion.
+
 #### Files you own
 
 | Path | Purpose |
@@ -307,6 +321,8 @@ for (const n of notes) {
 | `frontend/app/api/voice/summarize/route.ts` | summarizer endpoint |
 | `frontend/components/VoiceAgent.tsx` | the component Jin mounts |
 | `frontend/components/BriefingPanel.tsx` | briefing display |
+| `frontend/components/MeetingContextBoard.tsx` | live context board |
+| `frontend/components/LiveContextDiagram.tsx` | React Flow diagram |
 | `demo/standup_script.md` | 60-second standup script |
 
 #### Milestones
@@ -315,7 +331,7 @@ for (const n of notes) {
 - 12:30pm — Tab+mic mixer; `/api/voice/summarize` returns structured notes.
 - 1:30pm — Briefing fetched, rendered, passed to summarizer.
 - 2:30pm — Notes flowing: mic → summarizer → `meeting_notes` → Jin's Inputs tab.
-- 3:00pm — Live tool-calling: model invokes `search_project_context`, summarizer note cites the fetched item.
+- 3:00pm — Live tool-calling: model invokes `search_project_context`, summarizer note cites the fetched item, and the React Flow board updates from the returned context.
 - 5:00pm — Demo timed at ≤90s.
 
 ---
@@ -535,7 +551,7 @@ backend/
 |---|---|
 | `backend/**` | Yash |
 | `frontend/app/**` (excluding `api/voice/**`), `_tabs/**`, panels, `lib/supabase.ts`, `globals.css`, Tailwind | Jin |
-| `frontend/components/{VoiceAgent,BriefingPanel}.tsx`, `frontend/lib/{realtime,meetingAudio,voiceNoteSchema}.ts`, `frontend/app/api/voice/**` | Yudong |
+| `frontend/components/{VoiceAgent,BriefingPanel,MeetingContextBoard,LiveContextDiagram}.tsx`, `frontend/lib/{realtime,meetingAudio,voiceNoteSchema}.ts`, `frontend/app/api/voice/**` | Yudong |
 | `supabase/schema.sql` | Jin (canonical) |
 | `supabase/migrations/*.sql` | Yash adds, Jin applies |
 | `demo/**` | Yudong |
@@ -553,7 +569,7 @@ backend/
 export function VoiceAgent({ projectId, meetingId }: { projectId: string; meetingId: string }) {...}
 ```
 
-No callbacks back to the page — agent writes to `meeting_notes`; Jin's tab sees changes via realtime.
+No callbacks back to the page — agent writes to `meeting_notes`; Jin's tab sees changes via realtime. Any live React Flow context board stays inside `VoiceAgent`.
 
 ### Supabase write rules
 
@@ -613,7 +629,8 @@ Only Jin subscribes. Yudong relies on the `INSERT` response code; never opens a 
           Yash:   /plan/generate end-to-end (synthesis → categorize →
                   per-item Hyperspell GitHub → action drafts).
                   APScheduler cron.
-          Yudong: live tool-calling working; rehearsal practice.
+          Yudong: live tool-calling working; React Flow context board updates
+                  from /context/query; rehearsal practice.
           Jin:    Knowledge Doc tab + Actions tab fully reactive.
                   Animations, toasts, error states.
 
