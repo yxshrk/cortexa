@@ -267,7 +267,7 @@ frontend/components/ActionCard.tsx
 frontend/lib/supabase.ts
 frontend/app/globals.css
 tailwind config
-supabase/schema.sql
+supabase/migration_to_v2.sql
 supabase/migrations/*.sql
 ```
 
@@ -442,10 +442,10 @@ If action execution fails:
 
 ## Open Questions
 
-- **Blocking: Jin/Yash** — Is `supabase/schema.sql` meant to be updated to v2, or is `supabase/migration_to_v2.sql` the source of truth for the demo?
+- **Resolved: Jin/Yash** — `supabase/migration_to_v2.sql` is the demo schema source of truth.
 - **Resolved: Jin/Yudong** — `meetingId` comes from an internal Supabase `meetings` row. For demo, Jin selects the latest live meeting or uses a pre-seeded row before mounting `VoiceAgent`.
-- **Blocking: Jin/Yash** — What exact request body does `/plan/generate` expect: `{ projectId }`, `{ project_id }`, or query param?
-- **Non-blocking: Jin/Yash** — Should action execution return the updated action row, or should the frontend rely only on realtime?
+- **Resolved: Jin/Yash** — `/plan/generate` expects JSON body `{ projectId }` with `Authorization: Bearer ${NEXT_PUBLIC_DEMO_TOKEN}`.
+- **Resolved: Jin/Yash** — `/actions/{id}/execute` returns `{ externalUrl }`; frontend should update local UI optimistically and rely on realtime for final status.
 - **Non-blocking: Team** — What is the final demo project name and seeded project ID?
 
 ## Done Criteria

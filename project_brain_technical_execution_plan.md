@@ -655,8 +655,8 @@ Hard "never touches": Yash → no frontend, no schema (migrations only). Jin →
 | `backend/**` | Yash |
 | `frontend/app/**` (excl. `api/voice/**`), `_tabs/**`, panels, `lib/supabase.ts`, `globals.css`, Tailwind | Jin |
 | `frontend/components/{VoiceAgent,BriefingPanel,MeetingContextBoard,LiveContextDiagram}.tsx`, `frontend/lib/{realtime,meetingAudio,voiceNoteSchema}.ts`, `frontend/app/api/voice/**` | Yudong |
-| `supabase/schema.sql` | Jin (canonical) |
-| `supabase/migrations/*.sql` | Yash adds, Jin applies |
+| `supabase/migration_to_v2.sql` | Jin (demo schema source of truth) |
+| `supabase/migrations/*.sql` | Yash adds future diffs, Jin applies |
 | `demo/**` + `backend/fixtures/seed_code_refs.json` | Yudong + Yash (paired tonight) |
 
 **Schema change workflow**: Pre-day pair, frozen at 9:30am sync. Mid-day: `supabase/migrations/000N_*.sql` → Yash writes, Jin applies.
@@ -1339,7 +1339,7 @@ Idempotent because `/ingest/hyperspell` UPSERTs on `(project_id, source, externa
 - [ ] Devin form filled.
 - [ ] ngrok subdomain reserved.
 - [ ] `DEMO_TOKEN` generated; shared via 1Password.
-- [ ] Pair with Jin on `supabase/schema.sql` (§6) **including pgvector + RLS + grants**.
+- [ ] Pair with Jin on `supabase/migration_to_v2.sql` (§6) **including pgvector + RLS + grants**.
 - [ ] Pair with Yudong on `seed_code_refs.json` fixtures.
 
 **Yudong**
