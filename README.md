@@ -39,11 +39,9 @@ cortexa/
 │   └── .env.local.example
 ├── supabase/
 │   └── migration_to_v2.sql                         paste-and-run schema migration
-├── docs/                                            external-system knowledge dumps
-│   ├── README.md
-│   └── hyperspell.md                                connectors, SDKs, source enum mapping
-└── demo/                                           Yudong's standup script + fallback video
-    └── README.md
+└── docs/                                            external-system knowledge dumps
+    ├── README.md
+    └── hyperspell.md                                connectors, SDKs, source enum mapping
 ```
 
 ## Source of truth
