@@ -1,14 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { BriefingPanel, type Briefing } from "./BriefingPanel";
+import { activeFileLabel, BriefingPanel, themeLabel, type Briefing } from "./BriefingPanel";
 import { MeetingContextBoard } from "./MeetingContextBoard";
 import { captureMeetingAudio, MeetingAudioError } from "@/lib/meetingAudio";
 import { connectRealtime, type ProjectContextItem, type RealtimeConnection } from "@/lib/realtime";
+import { queryProjectContext } from "@/lib/contextQuery";
 import { supabase } from "@/lib/supabase";
 import type { VoiceNote } from "@/lib/voiceNoteSchema";
 
 type VoiceAgentStatus = "idle" | "loading" | "ready" | "listening" | "error";
+
+const DEFAULT_FASTAPI_URL = "http://localhost:8000";
 
 export function VoiceAgent({
   projectId,
@@ -23,24 +26,16 @@ export function VoiceAgent({
   const [contextItems, setContextItems] = useState<ProjectContextItem[]>([]);
   const [manualQuery, setManualQuery] = useState("Safari login redirect");
   const [connection, setConnection] = useState<RealtimeConnection | null>(null);
-  const [transcriptPreview, setTranscriptPreview] = useState("");
   const [lastNoteCount, setLastNoteCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   async function loadBriefing() {
     setStatus("loading");
     setError(null);
-    const fastApiUrl = process.env.NEXT_PUBLIC_FASTAPI_URL;
-    if (!fastApiUrl) {
-      setStatus("error");
-      setError("NEXT_PUBLIC_FASTAPI_URL is not configured.");
-      return;
-    }
+    const fastApiUrl = getFastApiUrl();
 
     try {
-      const res = await fetch(`${fastApiUrl}/context/briefing?projectId=${projectId}`);
-      if (!res.ok) throw new Error(`Briefing failed: ${res.status}`);
-      setBriefing((await res.json()) as Briefing);
+      setBriefing(await fetchBriefing(fastApiUrl));
       setStatus("ready");
     } catch (err) {
       setStatus("error");
@@ -58,24 +53,14 @@ export function VoiceAgent({
 
   async function startListener(mode: "meet" | "mic") {
     setError(null);
-    const fastApiUrl = process.env.NEXT_PUBLIC_FASTAPI_URL;
-    if (!fastApiUrl) {
-      setStatus("error");
-      setError("NEXT_PUBLIC_FASTAPI_URL is not configured.");
-      return;
-    }
+    setStatus("loading");
+    const fastApiUrl = getFastApiUrl();
 
     try {
       const activeBriefing = briefing ?? (await fetchBriefing(fastApiUrl));
       setBriefing(activeBriefing);
 
-      const tokenResponse = await fetch(`${fastApiUrl}/rt/token`, {
-        method: "POST",
-      });
-      if (!tokenResponse.ok) {
-        throw new Error(`Token request failed: ${tokenResponse.status}`);
-      }
-      const token = (await tokenResponse.json()) as { value?: string };
+      const token = await getRealtimeToken(fastApiUrl);
       if (!token.value) throw new Error("Token response missing value.");
 
       const stream =
@@ -100,11 +85,15 @@ export function VoiceAgent({
         briefingPrompt: buildBriefingPrompt(activeBriefing),
         projectId,
         fastApiUrl,
+        queryContext: (query) =>
+          queryProjectContext({
+            fastApiUrl,
+            projectId,
+            query,
+            k: 6,
+        }),
         onTranscript: (event) => {
-          if (event.type === "delta") {
-            setTranscriptPreview((prev) => `${prev}${event.text}`.slice(-500));
-          } else {
-            setTranscriptPreview(event.text);
+          if (event.type === "completed") {
             void persistTranscriptChunk(event.text, activeBriefing);
           }
         },
@@ -142,17 +131,16 @@ export function VoiceAgent({
 
   async function runManualContextQuery() {
     const query = manualQuery.trim();
-    const fastApiUrl = process.env.NEXT_PUBLIC_FASTAPI_URL;
+    const fastApiUrl = getFastApiUrl();
     if (!query || !fastApiUrl) return;
 
     try {
-      const res = await fetch(`${fastApiUrl}/context/query`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId, query, k: 6 }),
+      const items = await queryProjectContext({
+        fastApiUrl,
+        projectId,
+        query,
+        k: 6,
       });
-      if (!res.ok) throw new Error(`Context query failed: ${res.status}`);
-      const items = (await res.json()) as ProjectContextItem[];
       setContextQuery(query);
       setContextItems(items);
     } catch (err) {
@@ -218,6 +206,9 @@ export function VoiceAgent({
           <p className="text-sm text-ink-400">
             Project {projectId.slice(0, 8)} · Meeting {meetingId.slice(0, 8)}
           </p>
+          <p className="mt-1 text-xs font-medium uppercase tracking-wide text-ink-400">
+            Status: {status}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {status !== "listening" && (
@@ -251,7 +242,7 @@ export function VoiceAgent({
               value={manualQuery}
               onChange={(event) => setManualQuery(event.target.value)}
               className="min-w-0 flex-1 rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-ink-500"
-              placeholder="Demo context query"
+              placeholder="Search project context"
             />
             <button
               onClick={runManualContextQuery}
@@ -264,12 +255,12 @@ export function VoiceAgent({
         </div>
       </div>
 
-      {transcriptPreview && (
+      {lastNoteCount > 0 && (
         <div className="rounded-lg border border-ink-200 bg-ink-50 p-3 text-xs text-ink-500">
-          Hidden transcript signal: {transcriptPreview}
-          <span className="ml-2 text-ink-400">Notes inserted: {lastNoteCount}</span>
+          Notes inserted: {lastNoteCount}
         </div>
       )}
+
     </section>
   );
 }
@@ -279,8 +270,24 @@ function buildBriefingPrompt(briefing: Briefing) {
     "You are listening to an engineering meeting for Project Brain.",
     "Call search_project_context when project context would help participants understand the discussion.",
     `Project summary: ${briefing.project_summary ?? "Unknown project"}`,
-    `Themes: ${(briefing.themes ?? []).join(", ")}`,
-    `Active files: ${(briefing.active_files ?? []).map((file) => file.path).filter(Boolean).join(", ")}`,
+    `Themes: ${(briefing.themes ?? []).map(themeLabel).join(", ")}`,
+    `Active files: ${(briefing.active_files ?? []).map(activeFileLabel).filter(Boolean).join(", ")}`,
     "Prefer concise search queries of 3-8 words.",
   ].join("\n");
+}
+
+async function getRealtimeToken(fastApiUrl: string) {
+  const response = await fetch(`${fastApiUrl}/rt/token`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Token request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as { value?: string };
+}
+
+function getFastApiUrl() {
+  return process.env.NEXT_PUBLIC_FASTAPI_URL ?? DEFAULT_FASTAPI_URL;
 }

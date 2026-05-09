@@ -23,6 +23,7 @@ export type ConnectRealtimeOptions = {
   briefingPrompt: string;
   projectId: string;
   fastApiUrl: string;
+  queryContext?: (query: string) => Promise<ProjectContextItem[]>;
   onTranscript: (event: RealtimeTranscriptEvent) => void;
   onContextItems: (query: string, items: ProjectContextItem[]) => void;
   onError: (error: Error) => void;
@@ -49,12 +50,21 @@ export async function connectRealtime(
       JSON.stringify({
         type: "session.update",
         session: {
+          type: "realtime",
+          model: "gpt-realtime",
           instructions: options.briefingPrompt,
           audio: {
             input: {
-              transcription: { model: "gpt-4o-mini-transcribe" },
+              transcription: {
+                model: "gpt-4o-mini-transcribe",
+                language: "en",
+                prompt:
+                  "Engineering meeting about frontend code, React Flow, repositories, Supabase, FastAPI, and Google Meet.",
+              },
               turn_detection: {
                 type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
                 silence_duration_ms: 800,
               },
             },
@@ -93,7 +103,15 @@ export async function connectRealtime(
         name?: string;
         arguments?: string;
         call_id?: string;
+        error?: { message?: string; type?: string; code?: string };
       };
+
+      if (payload.type === "error") {
+        const errorMessage =
+          payload.error?.message ?? payload.error?.type ?? "Realtime session error.";
+        options.onError(new Error(errorMessage));
+        return;
+      }
 
       if (payload.type === "conversation.item.input_audio_transcription.delta") {
         options.onTranscript({ type: "delta", text: payload.delta ?? "" });
@@ -114,18 +132,20 @@ export async function connectRealtime(
         const query = args.query?.trim();
         if (!query) return;
 
-        const items = await fetch(`${options.fastApiUrl}/context/query`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: options.projectId, query, k: 6 }),
-        })
-          .then((res) => (res.ok ? res.json() : Promise.reject(res.statusText)))
-          .catch((error) => {
-            options.onError(
-              error instanceof Error ? error : new Error(String(error)),
-            );
-            return [];
-          });
+        const items = options.queryContext
+          ? await options.queryContext(query)
+          : await fetch(`${options.fastApiUrl}/context/query`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ projectId: options.projectId, query, k: 6 }),
+            })
+              .then((res) => (res.ok ? res.json() : Promise.reject(res.statusText)))
+              .catch((error) => {
+                options.onError(
+                  error instanceof Error ? error : new Error(String(error)),
+                );
+                return [];
+              });
 
         options.onContextItems(query, items as ProjectContextItem[]);
 
@@ -149,20 +169,19 @@ export async function connectRealtime(
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  const sdpResponse = await fetch(
-    "https://api.openai.com/v1/realtime?model=gpt-realtime",
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${options.token}`,
-        "content-type": "application/sdp",
-      },
-      body: offer.sdp,
+  const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${options.token}`,
+      "content-type": "application/sdp",
     },
-  );
+    body: offer.sdp,
+  });
 
   if (!sdpResponse.ok) {
-    throw new Error(`Realtime SDP exchange failed: ${sdpResponse.status}`);
+    throw new Error(
+      `Realtime SDP exchange failed: ${sdpResponse.status} ${await sdpResponse.text()}`,
+    );
   }
 
   const answer = await sdpResponse.text();
