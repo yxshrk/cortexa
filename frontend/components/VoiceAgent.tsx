@@ -27,6 +27,8 @@ export function VoiceAgent({
   const [manualQuery, setManualQuery] = useState("Safari login redirect");
   const [connection, setConnection] = useState<RealtimeConnection | null>(null);
   const [lastNoteCount, setLastNoteCount] = useState(0);
+  const [partialTranscript, setPartialTranscript] = useState("");
+  const [transcriptChunks, setTranscriptChunks] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   async function loadBriefing() {
@@ -53,6 +55,7 @@ export function VoiceAgent({
 
   async function startListener(mode: "meet" | "mic") {
     setError(null);
+    setPartialTranscript("");
     setStatus("loading");
     const fastApiUrl = getFastApiUrl();
 
@@ -91,9 +94,13 @@ export function VoiceAgent({
             projectId,
             query,
             k: 6,
-        }),
+          }),
         onTranscript: (event) => {
-          if (event.type === "completed") {
+          if (event.type === "delta") {
+            setPartialTranscript((current) => `${current}${event.text}`.slice(-900));
+          } else {
+            setPartialTranscript("");
+            setTranscriptChunks((chunks) => [event.text, ...chunks].slice(0, 8));
             void persistTranscriptChunk(event.text, activeBriefing);
           }
         },
@@ -260,6 +267,37 @@ export function VoiceAgent({
           Notes inserted: {lastNoteCount}
         </div>
       )}
+
+      <section className="rounded-lg border border-ink-200 bg-ink-50 p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-ink-900">Realtime Transcript</h3>
+          <span className="text-xs text-ink-400">
+            {transcriptChunks.length > 0 ? `${transcriptChunks.length} chunks` : "Waiting for speech"}
+          </span>
+        </div>
+
+        {partialTranscript || transcriptChunks.length > 0 ? (
+          <div className="max-h-56 space-y-3 overflow-y-auto pr-1">
+            {partialTranscript && (
+              <p className="rounded-lg border border-ink-200 bg-white p-3 text-sm text-ink-600">
+                {partialTranscript}
+              </p>
+            )}
+            {transcriptChunks.map((chunk, index) => (
+              <p
+                key={`${chunk.slice(0, 24)}-${index}`}
+                className="rounded-lg bg-white p-3 text-sm text-ink-600"
+              >
+                {chunk}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-dashed border-ink-200 bg-white p-5 text-center text-sm text-ink-400">
+            Start the listener and speak to see live transcript chunks here.
+          </div>
+        )}
+      </section>
 
     </section>
   );

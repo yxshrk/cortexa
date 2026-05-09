@@ -11,7 +11,7 @@ export function LiveContextDiagram({
   edges: Edge[];
 }) {
   return (
-    <div className="h-80 overflow-hidden rounded-lg border border-ink-200 bg-white">
+    <div className="h-[34rem] overflow-hidden rounded-lg border border-ink-200 bg-white">
       <ReactFlow nodes={nodes} edges={edges} fitView nodesDraggable={false}>
         <Background />
         <MiniMap pannable={false} zoomable={false} />

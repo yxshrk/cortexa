@@ -3,9 +3,12 @@ export type RealtimeTranscriptEvent =
   | { type: "completed"; text: string };
 
 export type ProjectContextItem = {
+  origin?: "local" | "hyperspell";
   source: string;
+  id?: string;
   title?: string | null;
   snippet?: string | null;
+  ref_url?: string | null;
   url?: string | null;
   ts?: string | null;
   score?: number;
@@ -29,6 +32,8 @@ export type ConnectRealtimeOptions = {
   onError: (error: Error) => void;
 };
 
+const REALTIME_MODEL = "gpt-realtime-2";
+
 export async function connectRealtime(
   options: ConnectRealtimeOptions,
 ): Promise<RealtimeConnection> {
@@ -51,7 +56,7 @@ export async function connectRealtime(
         type: "session.update",
         session: {
           type: "realtime",
-          model: "gpt-realtime",
+          model: REALTIME_MODEL,
           instructions: options.briefingPrompt,
           audio: {
             input: {
