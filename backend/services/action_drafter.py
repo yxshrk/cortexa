@@ -90,7 +90,10 @@ def _format_inputs(item: dict[str, Any], code_refs: list[dict[str, Any]]) -> str
 
 
 async def draft_actions(
-    *, item: dict[str, Any], code_refs: list[dict[str, Any]]
+    *,
+    item: dict[str, Any],
+    code_refs: list[dict[str, Any]],
+    emit: llm.EmitFn | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to 3 draft action rows (without project_id/plan_item_id/etc)."""
     user_msg = _format_inputs(item, code_refs)
@@ -103,9 +106,11 @@ async def draft_actions(
                 "Emit candidate Linear / GitHub / Devin action payloads for this plan item."
             ),
             tool_schema=TOOL_SCHEMA,
+            emit=emit,
+            emit_phase="draft_actions",
         )
     except Exception as e:
-        log.warning("action_drafter Claude call failed: %s", e)
+        log.warning("action_drafter LLM call failed: %s", e)
         return []
 
     drafts: list[dict[str, Any]] = []

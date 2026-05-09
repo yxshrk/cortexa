@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -127,16 +128,19 @@ async def context_query(
                 timeout=HYPERSPELL_TIMEOUT_S,
             )
             for h in hs_res.hits:
+                ref_url = h.ref_url
+                raw_score = _normalize_score(h.score)
                 hs_rows.append(
                     {
                         "origin": "hyperspell",
-                        "source": h.source or "",
+                        "source": _normalize_source(h.source or ""),
                         "id": h.resource_id or "",
                         "title": h.title,
-                        "snippet": None,
-                        "ref_url": h.ref_url,
+                        "snippet": h.title,
+                        "ref_url": ref_url,
                         "ts": None,
-                        "score": h.score,
+                        "score": raw_score,
+                        "_raw_score": raw_score,
                     }
                 )
         except asyncio.TimeoutError:
@@ -150,19 +154,23 @@ async def context_query(
         normalized_local.append(
             {
                 "origin": "local",
-                "source": str(row.get("source") or ""),
+                "source": _normalize_source(str(row.get("source") or "")),
                 "id": str(row.get("id") or ""),
                 "title": row.get("title"),
                 "snippet": row.get("snippet"),
                 "ref_url": row.get("ref_url"),
                 "ts": _iso(row.get("ts")),
-                "score": float(row["score"]) if row.get("score") is not None else None,
+                "score": _normalize_score(row.get("score")),
+                "_raw_score": _normalize_score(row.get("score")),
             }
         )
 
-    merged = _dedupe_and_sort(normalized_local + hs_rows, body.k)
-    _query_cache[cache_key] = (now, merged)
-    return [ContextItem(**row) for row in merged]
+    enriched_local = await asyncio.to_thread(_enrich_meeting_rows, sb, normalized_local)
+    reranked = _hybrid_rerank(enriched_local + hs_rows, body.query)
+    merged = _dedupe_and_sort(reranked, body.k)
+    public_rows = [_public_context_row(row) for row in merged]
+    _query_cache[cache_key] = (now, public_rows)
+    return [ContextItem(**row) for row in public_rows]
 
 
 def _local_search(
@@ -176,11 +184,17 @@ def _local_search(
 
 
 def _dedupe_and_sort(rows: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
-    """Dedupe by ref_url (when set) else by id; sort by score desc, None last."""
+    """Dedupe by ref_url (when set) else by id; sort by rank score."""
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
-    # First sort so the highest-scoring duplicate wins.
-    rows = sorted(rows, key=lambda r: (r.get("score") is None, -(r.get("score") or 0.0)))
+    # First sort so the highest-ranked duplicate wins.
+    rows = sorted(
+        rows,
+        key=lambda r: (
+            r.get("_rank_score") is None and r.get("score") is None,
+            -((r.get("_rank_score") if r.get("_rank_score") is not None else r.get("score")) or 0.0),
+        ),
+    )
     for row in rows:
         key = row.get("ref_url") or f"{row.get('origin')}:{row.get('id')}"
         if key in seen:
@@ -190,6 +204,131 @@ def _dedupe_and_sort(rows: list[dict[str, Any]], k: int) -> list[dict[str, Any]]
         if len(out) >= k:
             break
     return out
+
+
+def _normalize_source(source: str) -> str:
+    source = (source or "").strip().lower()
+    return {
+        "google_drive": "drive",
+        "google_mail": "gmail",
+    }.get(source, source)
+
+
+def _normalize_score(score: Any) -> float | None:
+    if score is None:
+        return None
+    try:
+        v = float(score)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, v))
+
+
+def _hybrid_rerank(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Blend semantic score + lexical overlap + recency + source/type priors."""
+    terms = [t for t in query.lower().split() if len(t) >= 2]
+    for row in rows:
+        haystack = f"{row.get('title') or ''} {row.get('snippet') or ''}".lower()
+        semantic = row.get("_raw_score")
+        if semantic is None:
+            semantic = row.get("score") or 0.0
+        lexical_hits = sum(1 for t in terms if t in haystack) if terms else 0
+        lexical = (lexical_hits / max(1, len(terms))) if terms else 0.0
+        recency = _recency_signal(row.get("ts"))
+        source_prior = _source_prior(row.get("source") or "", row.get("origin") or "")
+        meeting_type_bonus = _meeting_type_prior(row.get("_meeting_type"))
+        final = (
+            (0.65 * semantic)
+            + (0.22 * lexical)
+            + (0.08 * recency)
+            + source_prior
+            + meeting_type_bonus
+        )
+        # Preserve public `score` as raw semantic similarity for compatibility;
+        # use blended score only for ranking.
+        row["_rank_score"] = _normalize_score(final)
+    rows.sort(
+        key=lambda r: (
+            r.get("_rank_score") is None and r.get("score") is None,
+            -((r.get("_rank_score") if r.get("_rank_score") is not None else r.get("score")) or 0.0),
+        ),
+    )
+    return rows
+
+
+def _public_context_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+def _enrich_meeting_rows(sb: Client, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    meeting_ids = [r.get("id") for r in rows if r.get("source") == "meeting" and r.get("id")]
+    if not meeting_ids:
+        return rows
+    try:
+        r = (
+            sb.table("meeting_notes")
+            .select("id,type")
+            .in_("id", meeting_ids)
+            .execute()
+        )
+        type_by_id = {str(x.get("id")): x.get("type") for x in (r.data or [])}
+    except Exception as e:  # noqa: BLE001
+        log.warning("/context/query: meeting enrichment failed: %s", e)
+        return rows
+
+    for row in rows:
+        if row.get("source") != "meeting":
+            continue
+        meeting_type = type_by_id.get(str(row.get("id")))
+        if not meeting_type:
+            continue
+        row["_meeting_type"] = meeting_type
+        if meeting_type == "decision":
+            row["title"] = row.get("title") or "Decision"
+        elif meeting_type == "blocker":
+            row["title"] = row.get("title") or "Blocker"
+    return rows
+
+
+def _source_prior(source: str, origin: str) -> float:
+    if source == "meeting":
+        return 0.04
+    if source in {"drive", "notion"}:
+        return 0.02
+    if source == "slack":
+        return 0.015
+    if origin == "hyperspell":
+        return 0.0
+    return 0.01
+
+
+def _meeting_type_prior(meeting_type: Any) -> float:
+    if meeting_type == "decision":
+        return 0.06
+    if meeting_type == "blocker":
+        return 0.05
+    if meeting_type == "action_item":
+        return 0.03
+    return 0.0
+
+
+def _recency_signal(ts: Any) -> float:
+    if not ts:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_h = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+    if age_h <= 24:
+        return 1.0
+    if age_h <= 72:
+        return 0.7
+    if age_h <= 24 * 7:
+        return 0.4
+    return 0.15
 
 
 def _iso(value: Any) -> str | None:
