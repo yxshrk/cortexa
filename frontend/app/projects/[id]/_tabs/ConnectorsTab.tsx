@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { CONNECTORS, ConnectorId, FASTAPI_URL, supabase } from "@/lib/supabase";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CONNECTORS, ConnectorId, FASTAPI_URL, authHeaders, supabase } from "@/lib/supabase";
 
 type ProjectContext = {
   id: string;
@@ -87,21 +87,43 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   );
   const selectedDoc = docsForSource.find((d) => d.id === selectedDocId) ?? docsForSource[0];
 
+  // Track in-flight ingest so the popup-watcher and the "just_connected"
+  // bootstrap path never double-fire.
+  const ingestInFlight = useRef(false);
+
+  async function refreshIngest() {
+    if (ingestInFlight.current) return;
+    ingestInFlight.current = true;
+    try {
+      await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ projectId }),
+      });
+    } finally {
+      ingestInFlight.current = false;
+    }
+  }
+
   async function startConnect(source: ConnectorId) {
-    // Pre-open the window SYNCHRONOUSLY inside the click handler. Browsers
-    // (especially Safari) block window.open() called after an async await,
-    // because they only permit popups in direct response to a user gesture.
-    // We open about:blank now and redirect it once we have the OAuth URL.
-    const popup = window.open("about:blank", "_blank", "noopener,noreferrer");
+    // Pre-open the popup SYNCHRONOUSLY inside the click handler. Browsers
+    // (especially Safari) block window.open() called after an `await`, because
+    // popups must originate from a direct user gesture. We open about:blank
+    // now and navigate it to the OAuth URL once we have it.
+    //
+    // NOTE: no `noopener` — we keep the handle so we can poll `popup.closed`
+    // and auto-fire ingestion when OAuth finishes.
+    const popup = window.open("about:blank", "_blank");
+
+    // Where Hyperspell sends the user after OAuth. Hits a tiny page that
+    // closes itself; meanwhile this tab's polling loop fires the ingest.
+    const redirectUrl = `${window.location.origin}/connect/return?projectId=${encodeURIComponent(projectId)}&source=${encodeURIComponent(source)}`;
 
     try {
       const r = await fetch(`${FASTAPI_URL}/connect/start`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
-        },
-        body: JSON.stringify({ projectId, source }),
+        headers: authHeaders(),
+        body: JSON.stringify({ projectId, source, redirectUrl }),
       });
       if (!r.ok) {
         popup?.close();
@@ -115,8 +137,10 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
       }
       if (popup && !popup.closed) {
         popup.location.href = url;
+        watchPopupAndIngest(popup, source);
       } else {
-        // Popup was blocked despite synchronous open — fall back to same-tab redirect.
+        // Popup blocked → same-tab redirect. The /connect/return page will
+        // POST the ingest and bounce the user back to /projects/<id>.
         window.location.href = url;
       }
     } catch (e) {
@@ -125,15 +149,28 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     }
   }
 
-  async function refreshIngest() {
-    await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
-      },
-      body: JSON.stringify({ projectId }),
-    });
+  // Poll for popup close; once it closes, fire one ingest. Times out after
+  // 10 minutes so we don't leak the interval if the user wanders off.
+  function watchPopupAndIngest(popup: Window, _source: ConnectorId) {
+    const start = Date.now();
+    const iv = window.setInterval(() => {
+      const closed = (() => {
+        try {
+          return popup.closed;
+        } catch {
+          // Cross-origin access throws while OAuth is on Hyperspell's domain.
+          // Treat as "still open" — `popup.closed` is the one property browsers
+          // expose across origins, but some configurations still throw.
+          return false;
+        }
+      })();
+      if (closed) {
+        window.clearInterval(iv);
+        void refreshIngest();
+      } else if (Date.now() - start > 10 * 60_000) {
+        window.clearInterval(iv);
+      }
+    }, 750);
   }
 
   return (

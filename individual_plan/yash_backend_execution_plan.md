@@ -6,24 +6,88 @@ Build the FastAPI orchestration backend for Project Brain. You own everything fr
 
 You also own the seed corpus content and the demo-day fallback fixtures (paired with Yudong on the content).
 
+## 2026-05-09 Hyperspell SDK-First Refinement
+
+### Review verdict
+
+The current Hyperspell direction is correct, but the implementation has outrun the original plan in one area and is still behind it in the critical demo path.
+
+What is aligned:
+
+- Backend now uses the Python SDK directly instead of guessed REST shapes.
+- Every Hyperspell call is scoped by `projects.hyperspell_user_id`.
+- Source normalization is centralized in `backend/services/hyperspell.py`.
+- Connector OAuth, connection status, revoke, vault add/upload, web crawl, session ingestion, and answer-capable search are exposed as backend wrappers.
+- Frontend connector UX now opens the Hyperspell OAuth flow, redirects back to `/connect/return`, and triggers `/ingest/hyperspell` so `project_context` rows can appear via Supabase Realtime.
+
+What is not yet aligned:
+
+- The original Yudong contract still requires `POST /rt/token`, `GET /context/briefing`, and `POST /context/query`. The current `POST /search` is useful, but it is not a drop-in replacement because it is auth-gated, has a different response shape, and allows Hyperspell to wait up to 5s.
+- The original Jin contract still requires `POST /plan/generate` and `POST /actions/{id}/execute`. Those are not implemented yet.
+- APScheduler ingest and meeting-note embedding backfill are still plan-only.
+- `/ingest/hyperspell` currently uses one neutral semantic query for all connector sources. That is fine for a demo smoke path, but it is not a complete mirror. Use `memories.list(source=..., status="completed", size=...)` plus `memories.get(...)` as the durable mirror path, and use `memories.search(...)` as a ranking supplement.
+- `/memories/status` is a GET endpoint but lazily provisions `projects.hyperspell_user_id`. Either make it auth-gated or split user provisioning into an explicit mutating helper. Read endpoints should not write.
+
+### Refined execution order
+
+1. Stabilize the current Hyperspell wrapper.
+   - Keep `docs/hyperspell.md` and `backend/services/hyperspell.py` as the SDK source of truth for agents.
+   - Keep provider-to-integration UUID resolution for `integrations.connect(...)`; `connect` expects the integration ID, not our DB source string.
+   - Add `python-multipart` to requirements because `/memories/upload` otherwise prevents `backend/main.py` from importing.
+   - Log `QueryResult.errors` from `memories.search(...)` so missing connections are visible during demo setup.
+
+2. Restore frozen demo contracts before adding more Hyperspell features.
+   - Implement `routers/realtime.py` with `POST /rt/token`.
+   - Implement `routers/context.py` with `GET /context/briefing` and `POST /context/query`.
+   - Keep `/context/query` public, local pgvector first, Hyperspell second with a 500ms timeout, and return the `ContextItem[]` shape Yudong expects.
+   - Treat `POST /search` as an internal/power search endpoint, not the voice-agent contract.
+
+3. Make ingestion mirror-first and SDK-native.
+   - For each source in `slack`, `google_drive`, `notion`, `google_mail`, call `client.memories.list(source=hs_source, status="completed", size=100)`.
+   - Fan out `client.memories.get(resource_id, source=hs_source)` to extract `memories[]` / `data[]` text.
+   - Upsert to `project_context` by `(project_id, source, external_id)` and fallback `(project_id, source, content_hash)`.
+   - Return response fields as `upserted`, `by_source`, and optional `errors`; do not claim `skipped_dupes` unless you pre-check existing rows.
+   - Keep the current neutral `memories.search(...)` query as a bonus "latest planning context" pull if the list path returns too much noise.
+
+4. Push our own high-value artifacts back into Hyperspell.
+   - After a meeting ends, call `/memories/session` or the underlying `client.sessions.add(history=..., extract=["procedure","memory"])` with stable metadata `{project_id, meeting_id}`.
+   - After `/plan/generate` creates the weekly knowledge document, call `client.memories.add(text=summary_blob, resource_id=f"kdoc:{doc_id}", title=..., metadata={project_id, week_start, kind:"knowledge_document"})`.
+   - Use `add_bulk` for seed/demo corpus imports; keep chunks below Hyperspell's 100-item / 10MB batch limit.
+   - Supabase remains canonical for `meeting_notes`, `knowledge_documents`, `plan_items`, and `generated_actions`; Hyperspell is an extra recall layer.
+
+5. Finish the product path.
+   - Implement `/plan/generate`: synthesize, categorize, attach code refs, draft actions, and update `generation_runs`.
+   - Implement `get_code_refs(query)` with Hyperspell GitHub first and `backend/fixtures/seed_code_refs.json` fallback.
+   - Implement `/actions/{id}/execute` for Linear, GitHub PR draft, and Devin handoff.
+   - Start APScheduler only after manual route smoke tests pass; keep the pause-at-demo-time control.
+
+### Agent alignment contracts
+
+- Jin should keep calling `POST /connect/start`, `GET /connect/status`, `POST /ingest/hyperspell`, `POST /plan/generate`, and `POST /actions/{id}/execute` with `Authorization: Bearer ${NEXT_PUBLIC_DEMO_TOKEN}` for mutating routes.
+- Yudong should call only `POST /rt/token`, `GET /context/briefing`, and `POST /context/query`; no demo token should be required for those voice-agent reads.
+- No other agent should call Hyperspell directly from the browser. All Hyperspell API key usage stays in Yash's FastAPI backend.
+- If vault uploads, web crawls, or manual text memories need to appear in the Inputs UI, expand the DB enum intentionally; until then they are searchable through `/search` but are not mirrored into `project_context`.
+
 ## Key Changes
 
-- Stand up FastAPI with eight routes:
+- Stand up FastAPI with the core product routes plus Hyperspell utility routes:
   - `POST /rt/token` — proxy to `https://api.openai.com/v1/realtime/client_secrets`. Return `{ value, expires_at }` flat. Public.
   - `GET /context/briefing?projectId=X` — assemble briefing from last 7 days of `meeting_notes` + `project_context`, plus fresh Hyperspell latest design docs / active files. Cache per `(projectId, day)`. Public.
   - `POST /context/query` — sub-1s. Stage 1: pgvector cosine over `meeting_notes` + `project_context` via Supabase RPC `search_context`. Stage 2: Hyperspell live with 500ms timeout, merged best-effort. 60s same-query cache. Public.
-  - `POST /connect/start` — `{ projectId, source }` → Hyperspell connect URL for OAuth. Frontend opens it in a new tab. Lazily provisions `projects.hyperspell_user_id` (e.g. `pri-<projectId>`) on first call. Public.
+  - `POST /connect/start` — `{ projectId, source, redirectUrl? }` → Hyperspell connect URL for OAuth. Frontend opens it in a new tab. Lazily provisions `projects.hyperspell_user_id` (e.g. `pri-<projectId>`) on first call. Auth-gated because it writes the project row.
   - `GET /connect/status?projectId=X` — `{ slack, drive, notion, gmail, github: "connected"|"not_connected"|"beta" }`. Computed from Hyperspell `connections.list()` if available; falls back to a heuristic over `project_context` (presence of any row from a source ⇒ connected). 30s in-memory cache. Public.
-  - `POST /ingest/hyperspell` — Hyperspell search across Slack/Drive/Notion/Gmail, embed each item with `text-embedding-3-small`, UPSERT `project_context` (dedup on `(project_id, source, external_id)` or `content_hash`). Auth-gated.
+  - `POST /ingest/hyperspell` — Hyperspell list/search across Slack/Drive/Notion/Gmail, fetch full memory bodies, embed each item with `text-embedding-3-small`, UPSERT `project_context` (dedup on `(project_id, source, external_id)` or `content_hash`). Auth-gated.
   - `POST /plan/generate` — the linear pipeline. Synthesize → categorize → per-item Hyperspell GitHub → action drafts. Wrapped in `generation_runs` with `(project_id, week_start, idempotency_key)` unique key. REPLACE `plan_items` for the doc on rerun (cascades to `generated_actions`). Auth-gated.
   - `POST /actions/{id}/execute` — dispatch to Linear / GitHub / Devin. UPDATE `external_url` + `status`. Auth-gated.
+  - `POST /search` — auth-gated unified/power search: Hyperspell `memories.search(answer?)` plus local `search_context`. This is not Yudong's `/context/query` contract.
+  - `POST /memories/add`, `POST /memories/upload`, `GET /memories/status`, `POST /memories/web-crawl`, `POST /memories/session` — SDK-backed utility routes for manual memories, files, indexing status, web crawl, and transcript/agent-trace ingestion.
 - Build `get_code_refs(query)` with Hyperspell GitHub primary and `seed_code_refs.json` fixture fallback.
 - Normalize Hyperspell sources at the backend boundary. Hyperspell source names are `slack`, `notion`, `google_drive`, `google_mail`, and `github`; `project_context.source` stays the shorter DB enum (`slack`, `notion`, `drive`, `gmail`) for Jin's UI.
 - Scope Hyperspell calls with `projects.hyperspell_user_id` by constructing the Hyperspell client/request for that user. Do not assume Hyperspell accepts our Supabase `project_id` as a search parameter unless you add it as metadata/collection filtering.
 - Own a backend compatibility path for Yudong gaps: if `meeting_notes` rows arrive without `embedding`, FastAPI backfills them with `text-embedding-3-small` using the service-role key before `/context/query` relies on pgvector. This keeps live context search working without requiring frontend changes.
 - Own an auth-gated demo seed fallback: a script or backend-only helper can insert the three demo signals as `meeting_notes` + `project_context` rows with embeddings if the voice listener is behind schedule. Normal path still uses Yudong's inserts.
 - APScheduler in-process: `/ingest/hyperspell` every 5 minutes for every project, idempotent. Pause job at 5:55pm so the cron doesn't fire mid-demo.
-- Auth dependency `require_demo_token` on all mutating endpoints. Read endpoints stay public so Yudong's voice agent (no secret holder) can call them.
+- Auth dependency `require_demo_token` on all mutating endpoints. Read endpoints stay public only when they do not write; Yudong's `/rt/token`, `/context/briefing`, and `/context/query` stay public so the voice agent does not need a server secret.
 - All Supabase writes go through `supabase-py` with the service-role key (bypasses RLS). Never use anon key from backend.
 
 ## Implementation Details
@@ -86,6 +150,10 @@ Frozen response shape: `{ value: string, expires_at: number }`. Frontend (Yudong
 
 ### `/ingest/hyperspell`
 
+Updated rule: the durable mirror should use `memories.list(...)` per source,
+then `memories.get(...)` for bodies. `memories.search(...)` is a relevance
+booster, not the only mirror path.
+
 ```python
 HYPERSPELL_SOURCE_TO_DB_SOURCE = {
     "slack": "slack",
@@ -102,12 +170,13 @@ async def ingest_hyperspell(project_id: str):
 
     inserted, updated, skipped = 0, 0, 0
     for hs_source, db_source in HYPERSPELL_SOURCE_TO_DB_SOURCE.items():
-        items = await hs.memories.search(
-            query="latest project planning context, bugs, decisions, docs, blockers",
-            sources=[hs_source],
-            k=20,
+        resources = await hs.memories.list(
+            source=hs_source,
+            status="completed",
+            size=100,
         )
-        for item in items:
+        for resource in resources:
+            item = await hs.memories.get(resource.resource_id, source=resource.source)
             content_hash = sha256(item.full_text.encode()).hexdigest()
             embedding = await embed(item.full_text)
             row = {

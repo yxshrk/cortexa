@@ -408,10 +408,14 @@ async def web_crawl(
 
 
 # ─── sessions (agent traces / meeting transcripts) ────────────────────────────
+import json as _json
+
+
 async def session_add(
     *,
     hyperspell_user_id: str,
-    history: str,
+    history: str | list[dict[str, Any]],
+    format: str = "vercel",
     title: str | None = None,
     extract: list[str] | None = None,
     session_id: str | None = None,
@@ -419,13 +423,31 @@ async def session_add(
 ) -> dict[str, Any]:
     """Push a conversation transcript to Hyperspell.
 
-    `extract` controls what Hyperspell pulls out: any subset of
-    {"procedure","memory","mood"}.
+    `history` is a JSON-encoded transcript. We accept either:
+      - a list of message dicts (we JSON-encode for you), or
+      - a JSON-encoded string you've already prepared.
+
+    `format` is one of {'vercel', 'hyperdoc', 'openclaw'}. Live-tested 2026-05-09:
+    'vercel' accepts `[{"role": "user|assistant", "content": "..."}, ...]` shape;
+    'openclaw' returned 500; 'hyperdoc' has its own discriminated-union shape.
+    Default is 'vercel' since it's the simplest and only one we've verified.
+
+    `extract` ∈ subset of {'procedure', 'memory', 'mood'}.
     """
     client = get_client(hyperspell_user_id)
 
+    if isinstance(history, list):
+        history_str = _json.dumps(history)
+    else:
+        # Validate it's parseable JSON so the SDK doesn't 422 with an opaque error.
+        try:
+            _json.loads(history)
+        except _json.JSONDecodeError as e:
+            raise ValueError(f"session history must be JSON; got: {e}") from e
+        history_str = history
+
     def _do() -> Any:
-        kwargs: dict[str, Any] = {"history": history}
+        kwargs: dict[str, Any] = {"history": history_str, "format": format}
         if title:
             kwargs["title"] = title
         if extract:

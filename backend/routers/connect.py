@@ -21,6 +21,9 @@ DBSource = Literal["slack", "drive", "notion", "gmail", "github"]
 class ConnectStartBody(BaseModel):
     projectId: str
     source: DBSource
+    # Optional URL to send the user back to after OAuth completes. The frontend
+    # passes its own /connect/return page so we can auto-trigger ingestion.
+    redirectUrl: str | None = None
 
 
 class ConnectStartResponse(BaseModel):
@@ -60,7 +63,7 @@ def connect_start(
         raise HTTPException(400, "github is beta — see backend/fixtures/seed_code_refs.json")
 
     try:
-        url = hyperspell.connect_url(user_id, body.source)
+        url = hyperspell.connect_url(user_id, body.source, redirect_url=body.redirectUrl)
     except Exception as e:
         log.exception("connect_url failed")
         raise HTTPException(502, f"hyperspell connect failed: {e}")
@@ -105,3 +108,77 @@ def connect_status(projectId: str, sb: Client = Depends(get_supabase)) -> dict[s
 
     _status_cache[projectId] = (now, out)
     return out
+
+
+# ─── /connect/integrations ────────────────────────────────────────────────────
+@router.get(
+    "/integrations",
+    summary="All integrations Hyperspell exposes (so the connector list isn't hardcoded)",
+)
+async def list_integrations(
+    projectId: str, sb: Client = Depends(get_supabase)
+) -> dict:
+    """Wraps `client.integrations.list()`. Returns Hyperspell's full catalog
+    so the frontend can surface new connectors as Hyperspell adds them."""
+    project = supabase_writer.get_project(sb, projectId)
+    if not project:
+        raise HTTPException(404, f"project {projectId} not found")
+    user_id = project.get("hyperspell_user_id") or f"pri-{projectId}"
+    try:
+        return await hyperspell.list_integrations(user_id)
+    except Exception as e:
+        log.warning("integrations.list failed: %s", e)
+        raise HTTPException(502, f"hyperspell integrations.list failed: {e}")
+
+
+# ─── /connect/revoke ──────────────────────────────────────────────────────────
+class RevokeBody(BaseModel):
+    projectId: str
+    source: DBSource  # we accept our DB enum and translate
+
+
+@router.post(
+    "/revoke",
+    dependencies=[Depends(require_demo_token)],
+    summary="Revoke a Hyperspell connection by source name",
+)
+async def revoke_connection(
+    body: RevokeBody, sb: Client = Depends(get_supabase)
+) -> dict:
+    """Resolves source → Hyperspell connection_id → calls `connections.revoke`.
+
+    Also bumps the in-memory status cache so `/connect/status` reflects the change immediately.
+    """
+    if body.source == "github":
+        raise HTTPException(400, "github is beta — nothing to revoke")
+    project = supabase_writer.get_project(sb, body.projectId)
+    if not project:
+        raise HTTPException(404, f"project {body.projectId} not found")
+    user_id = project.get("hyperspell_user_id")
+    if not user_id:
+        raise HTTPException(400, "project has no hyperspell_user_id; nothing to revoke")
+
+    hs_provider = hyperspell.DB_TO_HS_SOURCE.get(body.source)
+    if not hs_provider:
+        raise HTTPException(400, f"unknown source: {body.source}")
+
+    try:
+        connection_id = await hyperspell.find_connection_id_for_provider(
+            hyperspell_user_id=user_id, hs_provider=hs_provider
+        )
+    except Exception as e:
+        log.warning("connections.list failed during revoke: %s", e)
+        raise HTTPException(502, f"hyperspell connections.list failed: {e}")
+    if not connection_id:
+        raise HTTPException(404, f"no connected {body.source} found")
+
+    try:
+        result = await hyperspell.revoke_connection(
+            hyperspell_user_id=user_id, connection_id=connection_id
+        )
+    except Exception as e:
+        log.exception("connections.revoke failed")
+        raise HTTPException(502, f"hyperspell revoke failed: {e}")
+
+    _status_cache.pop(body.projectId, None)
+    return {"revoked": True, "source": body.source, "connection_id": connection_id, "result": result}
