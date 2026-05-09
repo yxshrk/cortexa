@@ -132,6 +132,7 @@ Your core path captures meeting audio, transcribes it with OpenAI Realtime, summ
     meetingId: string;
   }) {}
   ```
+  `meetingId` is an internal Supabase `meetings.id` supplied by Jin's page. It is not a Google Meet ID or URL. Your component should assume the row already exists and use it only to group `meeting_notes` and `meeting_transcript_chunks`.
 - Yudong owns:
   - `frontend/lib/meetingAudio.ts`
   - `frontend/lib/realtime.ts`
@@ -174,6 +175,7 @@ Your core path captures meeting audio, transcribes it with OpenAI Realtime, summ
 
 - Yash provides working FastAPI endpoints: `/rt/token`, `/context/briefing`, and `/context/query`.
 - Jin provides Supabase project, anon key, pgvector schema, RLS allowing anon insert into `meeting_notes` and `meeting_transcript_chunks`, and mounts `VoiceAgent` in Inputs -> Meetings.
+- Jin provides a valid internal `meetingId` from the current project's latest live or pre-seeded `meetings` row; Yudong does not create `meetings` rows.
 - The user runs Chrome for Google Meet tab audio capture.
 - The main persisted output is embedded structured `meeting_notes`; raw transcript chunks are audit trail only.
 - React Flow is a live context aid owned by Yudong, not part of the five-table synthesis pipeline.

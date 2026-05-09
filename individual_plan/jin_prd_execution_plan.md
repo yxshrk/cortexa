@@ -163,6 +163,9 @@ Sections:
 - Project Context
 
 Meeting requirements:
+- `meetingId` is an internal Supabase `meetings.id`, not a Google Meet ID.
+- For the demo, select the latest `status = 'live'` meeting for the current project, or use a pre-seeded row titled "Demo Standup".
+- If no live meeting exists, show a setup empty state instead of mounting `VoiceAgent` with an undefined id.
 - Mount Yudong's component as:
   ```tsx
   <VoiceAgent projectId={projectId} meetingId={meetingId} />
@@ -440,7 +443,7 @@ If action execution fails:
 ## Open Questions
 
 - **Blocking: Jin/Yash** — Is `supabase/schema.sql` meant to be updated to v2, or is `supabase/migration_to_v2.sql` the source of truth for the demo?
-- **Blocking: Jin/Yudong** — Who creates the `meetings` row and passes `meetingId` into `VoiceAgent`?
+- **Resolved: Jin/Yudong** — `meetingId` comes from an internal Supabase `meetings` row. For demo, Jin selects the latest live meeting or uses a pre-seeded row before mounting `VoiceAgent`.
 - **Blocking: Jin/Yash** — What exact request body does `/plan/generate` expect: `{ projectId }`, `{ project_id }`, or query param?
 - **Non-blocking: Jin/Yash** — Should action execution return the updated action row, or should the frontend rely only on realtime?
 - **Non-blocking: Team** — What is the final demo project name and seeded project ID?

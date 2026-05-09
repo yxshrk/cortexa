@@ -661,11 +661,12 @@ Hard "never touches": Yash → no frontend, no schema (migrations only). Jin →
 
 **Schema change workflow**: Pre-day pair, frozen at 9:30am sync. Mid-day: `supabase/migrations/000N_*.sql` → Yash writes, Jin applies.
 
-**Component contract**: `<VoiceAgent projectId meetingId />` only. No callbacks. Communicates via Supabase writes; Jin sees changes via realtime.
+**Component contract**: `<VoiceAgent projectId meetingId />` only. `meetingId` is an internal Supabase `meetings.id`, not a Google Meet identifier. For the hackathon path, Jin selects the latest `status='live'` meeting for the project, or uses a pre-seeded demo meeting row, then passes that id into `VoiceAgent`. No callbacks. Communicates via Supabase writes; Jin sees changes via realtime.
 
 **Supabase write rules**:
 - Anon key: INSERT only on `meeting_notes` and `meeting_transcript_chunks`. SELECT on all reactive tables.
 - Service key: full access; bypasses RLS.
+- The browser does not create `meetings` rows with anon. Meeting rows are created or seeded by Jin/Yash during setup or by a future backend helper.
 
 **Realtime rule**: only Jin subscribes. Yudong relies on the INSERT response code.
 
