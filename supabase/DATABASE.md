@@ -43,6 +43,46 @@ erDiagram
 | `plan_items` | Categorized work items: `bug_fix`, `new_feature`, `maintenance` | Yash service role | Knowledge Doc tab |
 | `generated_actions` | Linear, GitHub PR, and Devin action drafts | Yash service role | Actions tab |
 
+## Supabase ↔ Hyperspell role split
+
+Hyperspell is now wired in. To avoid the question "which one is the source of truth?" creeping back in, here's the explicit split. **No tables are removed** — they all still earn their keep. But for each table you can answer "if Hyperspell is down, what still works?".
+
+| Table | Source of truth | Hyperspell involvement |
+|---|---|---|
+| `projects` | Supabase | Stores `hyperspell_user_id` (e.g. `pri-<projectId>`) linking the project to its Hyperspell vault. Otherwise app-only. |
+| `meetings` | Supabase | None — internal meeting orchestration. |
+| `meeting_notes` | Supabase | **Local pgvector first** for sub-100ms live search. Optionally push to Hyperspell via `sessions.add(history=...)` so global "ask anything" search includes meetings. |
+| `meeting_transcript_chunks` | Supabase | None — audit/debug trail. |
+| `project_context` | **Hyperspell** (mirrored locally) | Populated by `POST /ingest/hyperspell`: `memories.search` → `memories.get` → embed → UPSERT here. Hyperspell is upstream; this table is a cache. |
+| `knowledge_documents` | Supabase (Claude-generated) | None directly. Optionally call `memories.add(text=summary)` after generation so next week's synthesis can search prior knowledge docs. |
+| `generation_runs` | Supabase | None — internal orchestration state. |
+| `plan_items` | Supabase (Claude-generated) | None — our generated artifact. |
+| `generated_actions` | Supabase (Claude-generated) | None directly. `actions.send_message` (Slack/Gmail) is invoked at *execute* time but no Hyperspell row is read. |
+
+### Why we mirror `project_context` instead of always hitting Hyperspell
+
+1. **Realtime fan-out** — Supabase publishes INSERTs on `project_context`; the Connectors tab updates without polling. Hyperspell has no comparable push.
+2. **Sub-100ms vector search** for live meeting context via `search_context` RPC. Hyperspell over the network is hundreds of ms.
+3. **Resilience** — if Hyperspell is slow or rate-limited, pgvector still answers `/context/query`.
+4. **Ranking control** — the `search_context` SQL merges meeting + connector chunks with weights *we* set; Hyperspell's ranker is a black box.
+
+### Data flow at a glance
+
+```
+Hyperspell connectors (Slack, Drive, Notion, Gmail, …)
+          │
+          ▼  POST /ingest/hyperspell  (search → get → embed → upsert)
+   project_context (mirror, with vector(1536))
+          │
+          ▼  search_context RPC
+   /context/query  ──→  /plan/generate  ──→  knowledge_documents, plan_items, generated_actions
+          ▲                                          │
+          │                                          │ optional: memories.add(text=summary)
+   meeting_notes (also mirrored, optionally pushed   │   feeds future synthesis
+   to Hyperspell via sessions.add)                   ▼
+                                              Hyperspell vault
+```
+
 ## Important Design Choices
 
 - `generated_actions.project_id` is intentionally denormalized so Supabase Realtime can filter directly with `project_id=eq.<projectId>`.

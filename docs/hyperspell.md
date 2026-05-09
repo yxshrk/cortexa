@@ -1,173 +1,210 @@
-# Hyperspell — what we know
+# Hyperspell — verified API surface for Project Brain
 
-> Source-of-truth dump for agents (Codex, Claude in Cursor, etc.) building Project Brain integrations.
-> Compiled from `https://docs.hyperspell.com/`, `https://www.hyperspell.com/`, and the Nozomio hackathon attendee doc on May 9, 2026.
-> **Agents: cite the upstream URL when you copy something into code.** Mark anything not verified here as `[VERIFY]`.
+> Locked against `hyperspell` SDK **0.37.0** (Python). Auto-generated from
+> `https://app.stainlessapi.com/api/spec/documented/hyperspell.yaml` — every
+> endpoint at `https://docs.hyperspell.com/api-reference/` has a corresponding
+> SDK method.
+>
+> **For agents:** if you need a method that isn't here, do
+> `python3 -c "from hyperspell import Hyperspell; c=Hyperspell(api_key='x'); print([m for m in dir(c.<resource>) if not m.startswith('_')])"`
+> rather than guessing. Docs URL = source of truth, SDK = mechanical mapping.
 
 ---
 
 ## What it is
 
-Hyperspell is "the company brain for AI agents." It connects to a team's data sources (Slack, Gmail, Google Drive, Notion, GitHub, etc.), continuously indexes them, and exposes a unified search API agents can call to retrieve relevant memories.
+Hyperspell is "the company brain for AI agents." It connects to a team's data
+sources (Slack, Gmail, Google Drive, Notion, GitHub, etc.), continuously
+indexes them, and exposes a unified search API.
 
-- Backed by Y Combinator. SOC 2 certified.
 - Track sponsor at the Nozomio hackathon. Cash prize: **$1k + 6 months unlimited + founders deploy session + amplification** for the best Hyperspell-using submission.
 - Docs root: <https://docs.hyperspell.com/>
-- Connect-flow docs: <https://docs.hyperspell.com/usage/connect>
-- Manual integration: <https://docs.hyperspell.com/core/integration>
+- API reference: <https://docs.hyperspell.com/api-reference/>
+- llms.txt index: <https://docs.hyperspell.com/llms.txt>
 
 ---
 
-## Sources / connectors
+## Where Hyperspell sits relative to Supabase
 
-Confirmed (per company description + integration docs):
+Short version: **Hyperspell is the upstream source for connector data;
+Supabase is the local mirror + everything else.** Full per-table breakdown
+lives in `supabase/DATABASE.md` ("Supabase ↔ Hyperspell role split"). Don't
+duplicate that table here — keep one source of truth.
 
-- **slack**
-- **gmail** *(Hyperspell may name it `google_mail` in source enums — verify)*
-- **google_drive** (Docs / Sheets / Slides)
-- **google_calendar**
-- **box**
-- **notion**
-- **github** — *beta, not available to all users* (per `https://docs.hyperspell.com/integrations/all/github`)
-
-Our DB enum (`context_source`) uses shorter names: `slack`, `drive`, `notion`, `gmail`. **The backend normalizes** between Hyperspell's names and ours (see `backend/services/hyperspell.py` per Yash's plan).
+What this means in practice:
+- `project_context` rows are a **cache** of Hyperspell hits, embedded locally for pgvector search and Realtime UI fan-out. If Hyperspell is down, pgvector still answers.
+- `meeting_notes`, `knowledge_documents`, `plan_items`, `generated_actions` are **Supabase-authoritative**. Hyperspell never owns these. We optionally *push* meeting transcripts and finished knowledge docs *to* Hyperspell so the unified "ask anything" search includes them, but the local row is canonical.
+- Generation orchestration (`generation_runs`, `meetings`, `meeting_transcript_chunks`) is Supabase-only — Hyperspell has no concept of these.
 
 ---
 
-## SDKs
+## Source enum (canonical)
 
-| Language | Install |
-|---|---|
-| Python     | `pip install hyperspell` |
-| TypeScript | `npm install hyperspell` |
+Hyperspell's full source enum is:
 
-Auth: API key from `https://app.hyperspell.com/`. Construct a per-user client:
-```python
-from hyperspell import Hyperspell
-client = Hyperspell(api_key="API_KEY", user_id="YOUR_USER_ID")
+```
+reddit | notion | slack | google_calendar | google_mail | box | dropbox |
+github | google_drive | vault | web_crawler | trace | microsoft_teams | gmail_actions
 ```
 
-For Project Brain: `user_id` is `projects.hyperspell_user_id` (e.g. `pri-<projectId>`). Lazily provisioned by Yash's `/connect/start` on first call per project.
-
----
-
-## API surface (what we use)
-
-### Add memories
-
-Single:
-```python
-client.memories.add(text="...", metadata={...})  # returns resource_id
-```
-
-Bulk:
-```python
-client.memories.add_bulk([...])  # up to 100 items, 10 MB total
-```
-
-If validation fails on any item, the **whole batch is rejected** with a detailed error. Pre-validate.
-
-### Search memories
-
-```python
-client.memories.search(
-    query="natural language",
-    sources=["slack", "google_drive"],   # use Hyperspell source names
-    options={
-        "filter": {...},                 # [VERIFY] schema
-        "resource_ids": ["..."],         # restrict to specific docs
-        "max_results": 20,
-        "weight": {                      # per-source weights
-            "slack": 1.0,
-            "google_drive": 0.5,
-        },
-    },
-    answer=False,                        # set True to get an LLM-generated answer
-    answer_model="deepseek-r1",          # default fine-tuned Llama-3.1-Instruct-8B; alts: deepseek-r1, mistral-saba, qwen-qwq
-)
-```
-
-Multi-source returns are **merged** by Hyperspell.
-
-### Connect flow (OAuth)
-
-`https://docs.hyperspell.com/usage/connect`. The flow we expect:
-
-1. Backend calls Hyperspell to mint a connect URL for a `(user_id, source)` pair, optionally with a `redirect_url`.
-2. Frontend redirects (or opens new tab to) the connect URL.
-3. User authorizes the source via Hyperspell's hosted OAuth page.
-4. Hyperspell redirects back to our `redirect_url` (or just returns to its own page).
-5. Backend can query connection status (e.g. via `client.connections.list()` `[VERIFY]`).
-
-`[VERIFY]` exact method names — the docs page is the source of truth. If the SDK doesn't expose `connections.list()`, fall back to a heuristic: presence of any `project_context` row from a source ⇒ that source is connected for that user.
-
-### What we do NOT use
-
-- `client.memories.add()` directly (we let Hyperspell ingest from connectors, not us pushing).
-- The `answer=True` LLM-generated answer mode (we use Claude as our planner).
-
----
-
-## How Project Brain uses Hyperspell
-
-Three distinct call sites in `backend/services/hyperspell.py`:
-
-1. **`/ingest/hyperspell` (cron + manual button)** — pulls Slack / Drive / Notion / Gmail every 5 min, embeds locally with `text-embedding-3-small`, UPSERTs into `project_context`. Dedup on `(project_id, source, external_id)` then `(project_id, source, content_hash)`.
-2. **`/context/query` Stage 2 (live during meetings)** — best-effort live Hyperspell search merged with pgvector results. 500ms timeout — pgvector alone is sufficient if Hyperspell is slow.
-3. **`/plan/generate` per-item code refs** — for each plan item the categorizer emits, runs `client.memories.search(item.code_query, sources=["github"], k=3)`. **Falls back to `backend/fixtures/seed_code_refs.json` if GitHub beta access is denied.**
-
----
-
-## Pricing & limits
-
-Free tier exists. Hackathon credits via `https://www.hyperspell.com/` — 6 months of unlimited usage as the track prize.
-
-- Bulk add: ≤100 items per request, ≤10 MB total.
-- Search: no documented rate limits we've seen — `[VERIFY]` if it becomes a problem.
-
----
-
-## Source enum mapping (canonical)
+Our DB enum (`context_source`) is the smaller subset:
 
 | Hyperspell source | Our DB enum (`context_source`) |
 |---|---|
 | `slack` | `slack` |
 | `notion` | `notion` |
 | `google_drive` | `drive` |
-| `google_mail` *(or `gmail`)* | `gmail` |
-| `github` *(beta)* | *(not stored in `project_context`; used directly via `code_refs`)* |
+| `google_mail` | `gmail` |
+| `github` | (not stored in `project_context`; used directly via `code_refs`) |
+| `vault` | (not currently stored; vault items reachable via `/search` only) |
+| `web_crawler` | (not currently stored; crawled pages reachable via `/search` only) |
 
-Yash's `backend/services/hyperspell.py` owns this mapping. `[VERIFY]` the exact Hyperspell strings against the SDK before shipping.
-
----
-
-## What's verified vs `[VERIFY]`
-
-| Claim | Status |
-|---|---|
-| Has Slack, Gmail, Drive, Notion, Box, Calendar connectors | ✅ verified (company description + integration docs) |
-| GitHub connector is beta, not GA | ✅ verified (integration docs) |
-| Python + TypeScript SDKs exist | ✅ verified |
-| `client.memories.add` / `.add_bulk` / `.search` exist | ✅ verified |
-| Bulk limit: 100 items, 10 MB | ✅ verified |
-| `answer_model` accepts `deepseek-r1`, `mistral-saba`, `qwen-qwq` | ✅ verified |
-| Default answer model: Llama-3.1-Instruct-8B (fine-tuned) | ✅ verified |
-| Exact connect URL pattern (whether SDK or REST) | `[VERIFY]` against `https://docs.hyperspell.com/usage/connect` |
-| `client.connections.list()` method name | `[VERIFY]` |
-| Source enum literal strings (especially `gmail` vs `google_mail`) | `[VERIFY]` |
-| Filter / metadata / collection schema in `options.filter` | `[VERIFY]` |
-| Per-`user_id` isolation guarantees | `[VERIFY]` — assumed but not yet stress-tested |
-| Free-tier rate limits | `[VERIFY]` |
-
-When you verify any of these, **delete the `[VERIFY]`** and replace with a citation + commit.
+Mapping lives in `backend/services/hyperspell.py` (`HS_TO_DB_SOURCE` /
+`DB_TO_HS_SOURCE`).
 
 ---
 
-## How to extend this doc
+## SDK construction
 
-When you discover something new about Hyperspell while implementing:
+```python
+from hyperspell import Hyperspell
+client = Hyperspell(api_key=settings.hyperspell_key, user_id="pri-<projectId>")
+```
 
-1. Add it under the right section above.
-2. Tag with a source URL. If it's from the SDK source code, add the file path.
-3. If you find a contradiction with what's here, **change the doc and flag it in Slack** — don't silently override.
-4. Don't dump raw transcripts. Summarize.
+`user_id` is `projects.hyperspell_user_id` — lazily provisioned by
+`/connect/start` on first call per project.
+
+The SDK is sync; wrap calls in `asyncio.to_thread(...)` from async routes.
+
+---
+
+## Endpoints we expose
+
+All under `http://localhost:8000` in dev. Mutating endpoints require
+`Authorization: Bearer ${DEMO_TOKEN}`.
+
+### Connect / connections
+
+| Method + path | Wraps SDK call | Purpose |
+|---|---|---|
+| `POST /connect/start` | `client.integrations.connect(integration_id, redirect_url=...)` | Mint OAuth URL for `(projectId, source)`. Returns `{url, hyperspell_user_id}`. |
+| `GET  /connect/status` | `client.connections.list()` + heuristic | Per-source connection map: `{slack: connected, drive: not_connected, ...}`. 30s in-memory cache. |
+| `GET  /connect/integrations` | `client.integrations.list()` | Hyperspell's full integration catalog. Use to render new connectors as Hyperspell adds them. |
+| `POST /connect/revoke` | `client.connections.revoke(connection_id)` | Body `{projectId, source}`. Resolves `source` → connection_id internally, then revokes. Busts the status cache. |
+
+### Memories (vault / files / status)
+
+| Method + path | Wraps SDK call | Purpose |
+|---|---|---|
+| `POST /memories/add` | `client.memories.add(text, title?, collection?, metadata?)` | Push arbitrary text to the project's vault. Returns `{resource_id, source, status}`. |
+| `POST /memories/upload` | `client.memories.upload(file, metadata?)` | Multipart file upload (PDF/doc/etc.). `metadata` is a JSON-encoded **string** (Hyperspell's quirk — we validate before sending). |
+| `GET  /memories/status` | `client.memories.status()` | Per-provider indexing progress. Useful for UI: "Slack: 87% indexed". |
+| `POST /memories/web-crawl` | `client.integrations.web_crawler.index(url, limit?, max_depth?)` | Recursively crawl a URL. Pages become searchable under `source=web_crawler`. |
+| `POST /memories/session` | `client.sessions.add(history, extract?, title?, session_id?, metadata?)` | Store a transcript / agent trace. `extract` ∈ `{procedure, memory, mood}`. |
+
+### Ingest (Hyperspell → Supabase mirror)
+
+| Method + path | Wraps SDK calls | Purpose |
+|---|---|---|
+| `POST /ingest/hyperspell` | `memories.search` + `memories.get` (parallel fan-out) → embed → upsert `project_context` | Pulls connector items into the local mirror. Idempotent on `(project_id, source, external_id)` then `(project_id, source, content_hash)`. Auto-fired after OAuth completes. |
+
+### Unified search
+
+| Method + path | Wraps SDK call | Purpose |
+|---|---|---|
+| `POST /search` | `client.memories.search(query, sources?, max_results, answer?)` **+** Supabase `search_context` RPC | Two parallel calls, merged in the response. Hyperspell can `answer=true` for an LLM-synthesized answer; local pgvector backstops latency / outage. Returns `{answer, query_id, hits[], hyperspell_ok, local_ok}`. 5s timeout on Hyperspell. |
+
+---
+
+## SDK reference (resources we use, locked to 0.37.0)
+
+| Resource | Methods | Notes |
+|---|---|---|
+| `client.auth` | `me()`, `user_token(user_id, expires_in?, origin?)`, `delete_user()` | `user_token` is for handing a per-user token to the frontend. We currently mint connect URLs server-side via `integrations.connect` instead, so `user_token` is unused. |
+| `client.memories` | `add`, `add_bulk` (≤100, ≤10MB), `upload`, `get`, `list`, `search`, `update`, `delete`, `status` | `search` returns `QueryResult{documents: [Resource], answer?, query_id?, score?}`. `Resource` has metadata only — no body. Use `get(resource_id, source=...)` per hit for full text (`Memory.memories: List[str]`). |
+| `client.integrations` | `connect(integration_id, redirect_url?)`, `list()`, `slack.list(...)`, `google_calendar.list()`, `web_crawler.index(url, limit?, max_depth?)` | `connect` returns `{url, expires_at}` ready to redirect to. |
+| `client.connections` | `list()`, `revoke(connection_id)` | `Connection{id, integration_id, label?, provider}`. Presence in the list ⇒ connected. |
+| `client.sessions` | `add(history, extract?, format?, title?, session_id?, metadata?)` | `extract` subset of `{procedure, memory, mood}`. Returns a `MemoryStatus`. |
+| `client.actions` | `send_message(provider, text, channel?, parent?)`, `add_reaction(...)` | Lets agents post back to Slack/Gmail. We don't expose this yet — wire up when the Actions tab needs a "post to Slack" affordance. |
+| `client.evaluate` | `score_query(query_id, score)`, `score_highlight(highlight_id, ...)`, `get_query(query_id)` | Feedback loop for the search ranker. Worth wiring when we have a thumbs-up/down UI. |
+| `client.folders` | `list(connection_id, parent_id?)`, `set_policies(connection_id, ...)`, `list_policies(...)`, `delete_policy(...)` | Per-folder sync control (e.g. "only sync /Engineering in Drive, skip /HR"). Power-user feature; not exposed yet. |
+| `client.vaults` | `list(cursor?, size?)` | List collections. We use the default collection for now. |
+
+### Search options (`memory_search_params.Options`)
+
+```python
+options = {
+    "after":       "2026-01-01T00:00:00Z",   # ISO8601 lower bound
+    "before":      "2026-12-31T23:59:59Z",   # ISO8601 upper bound
+    "answer_model": "deepseek-r1",           # llama-3.1 (default) | gemma2 | qwen-qwq
+                                              # | mistral-saba | llama-4-scout | deepseek-r1
+                                              # | gpt-oss-20b | gpt-oss-120b
+    "memory_types": ["procedure", "memory", "mood"],
+    "resource_ids": ["..."],                 # restrict to specific docs
+    "filter":       {...},                   # custom metadata filter
+    "max_results":  20,
+    # Per-source nested options:
+    "slack":        {...}, "notion":       {...}, "google_drive": {...},
+    "google_mail":  {...}, "google_calendar": {...},
+    "vault":        {...}, "web_crawler":  {...}, "box":          {...},
+    "reddit":       {...},
+}
+```
+
+Top-level `max_results`, `sources`, `answer`, `effort` are also accepted as
+direct kwargs to `client.memories.search()` — that's what we use.
+
+---
+
+## OAuth connect flow (verified)
+
+1. Frontend `ConnectorsTab.startConnect(source)` opens a popup synchronously
+   (no `noopener`, so we can poll `popup.closed`).
+2. Frontend POSTs `/connect/start` with `{projectId, source, redirectUrl}`.
+   `redirectUrl` points back to our `/connect/return` page.
+3. Backend resolves `projectId` → `hyperspell_user_id`, calls
+   `client.integrations.connect(integration_id, redirect_url=redirectUrl)`,
+   returns `{url, hyperspell_user_id}`.
+4. Frontend navigates the popup to `url`. Hyperspell hosts OAuth, then
+   redirects the popup to our `/connect/return`.
+5. `/connect/return` either closes itself (popup case) or fires
+   `/ingest/hyperspell` itself (same-tab fallback).
+6. Opener tab's `watchPopupAndIngest` polls `popup.closed` and fires
+   `/ingest/hyperspell` once after close. A `useRef` guard prevents
+   double-fire if both paths trigger.
+
+End result: from the user's perspective, click → authorize → data appears
+live in the UI via Supabase Realtime on `project_context`.
+
+---
+
+## MCP — not used in our backend
+
+Hyperspell ships an [MCP server](https://www.npmjs.com/package/@hyperspell/hyperspell-mcp) that exposes ~7 tools (search, add_memory, get_memory, upload_file, list_integrations, connect_integration, user_info). **We don't consume it from FastAPI** — the SDK gives us 40+ endpoints (sessions, folders, evaluate, actions) plus determinism, typing, and lower latency.
+
+MCP is still useful as a **side-feature** for power users: a developer can
+add the Hyperspell MCP server to their `~/Library/Application Support/Claude/claude_desktop_config.json`
+to ask Claude Desktop questions about their Project Brain vault directly. See
+the upstream MCP doc page for the JSON snippet. This is a docs note, not
+something the app itself needs to wire.
+
+---
+
+## Pricing & limits
+
+- Free tier exists. Hackathon: 6 months unlimited as the track prize.
+- Bulk add: ≤100 items per request, ≤10 MB total.
+- Search: no documented hard rate limit — handle `RateLimitError` if it surfaces.
+
+---
+
+## SDK exception classes (catch these)
+
+From `hyperspell` top-level: `AuthenticationError`, `BadRequestError`,
+`NotFoundError`, `ConflictError`, `RateLimitError`, `APITimeoutError`,
+`APIConnectionError`, `APIStatusError`, `PermissionDeniedError`,
+`UnprocessableEntityError`, `InternalServerError`, `APIResponseValidationError`,
+`HyperspellError` (base).
+
+Our routers catch broadly with `except Exception` and surface as 502; tighten
+to specific classes if/when we want different status codes.

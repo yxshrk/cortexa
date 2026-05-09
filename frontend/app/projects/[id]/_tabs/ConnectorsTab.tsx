@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { CONNECTORS, ConnectorId, FASTAPI_URL, supabase } from "@/lib/supabase";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CONNECTORS, ConnectorId, FASTAPI_URL, authHeaders, supabase } from "@/lib/supabase";
 
 type ProjectContext = {
   id: string;
@@ -87,32 +87,90 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   );
   const selectedDoc = docsForSource.find((d) => d.id === selectedDocId) ?? docsForSource[0];
 
-  async function startConnect(source: ConnectorId) {
-    const r = await fetch(`${FASTAPI_URL}/connect/start`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
-      },
-      body: JSON.stringify({ projectId, source }),
-    });
-    if (!r.ok) {
-      alert(`Connect failed: ${r.status} ${await r.text()}`);
-      return;
-    }
-    const { url } = await r.json();
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
-  }
+  // Track in-flight ingest so the popup-watcher and the "just_connected"
+  // bootstrap path never double-fire.
+  const ingestInFlight = useRef(false);
 
   async function refreshIngest() {
-    await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
-      },
-      body: JSON.stringify({ projectId }),
-    });
+    if (ingestInFlight.current) return;
+    ingestInFlight.current = true;
+    try {
+      await fetch(`${FASTAPI_URL}/ingest/hyperspell`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ projectId }),
+      });
+    } finally {
+      ingestInFlight.current = false;
+    }
+  }
+
+  async function startConnect(source: ConnectorId) {
+    // Pre-open the popup SYNCHRONOUSLY inside the click handler. Browsers
+    // (especially Safari) block window.open() called after an `await`, because
+    // popups must originate from a direct user gesture. We open about:blank
+    // now and navigate it to the OAuth URL once we have it.
+    //
+    // NOTE: no `noopener` — we keep the handle so we can poll `popup.closed`
+    // and auto-fire ingestion when OAuth finishes.
+    const popup = window.open("about:blank", "_blank");
+
+    // Where Hyperspell sends the user after OAuth. Hits a tiny page that
+    // closes itself; meanwhile this tab's polling loop fires the ingest.
+    const redirectUrl = `${window.location.origin}/connect/return?projectId=${encodeURIComponent(projectId)}&source=${encodeURIComponent(source)}`;
+
+    try {
+      const r = await fetch(`${FASTAPI_URL}/connect/start`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ projectId, source, redirectUrl }),
+      });
+      if (!r.ok) {
+        popup?.close();
+        alert(`Connect failed: ${r.status} ${await r.text()}`);
+        return;
+      }
+      const { url } = await r.json();
+      if (!url) {
+        popup?.close();
+        return;
+      }
+      if (popup && !popup.closed) {
+        popup.location.href = url;
+        watchPopupAndIngest(popup, source);
+      } else {
+        // Popup blocked → same-tab redirect. The /connect/return page will
+        // POST the ingest and bounce the user back to /projects/<id>.
+        window.location.href = url;
+      }
+    } catch (e) {
+      popup?.close();
+      alert(`Connect error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Poll for popup close; once it closes, fire one ingest. Times out after
+  // 10 minutes so we don't leak the interval if the user wanders off.
+  function watchPopupAndIngest(popup: Window, _source: ConnectorId) {
+    const start = Date.now();
+    const iv = window.setInterval(() => {
+      const closed = (() => {
+        try {
+          return popup.closed;
+        } catch {
+          // Cross-origin access throws while OAuth is on Hyperspell's domain.
+          // Treat as "still open" — `popup.closed` is the one property browsers
+          // expose across origins, but some configurations still throw.
+          return false;
+        }
+      })();
+      if (closed) {
+        window.clearInterval(iv);
+        void refreshIngest();
+      } else if (Date.now() - start > 10 * 60_000) {
+        window.clearInterval(iv);
+      }
+    }, 750);
   }
 
   return (
@@ -159,12 +217,31 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
             );
           })}
         </ul>
-        <button
-          onClick={() => startConnect(selectedSource)}
-          className="mt-3 w-full rounded-lg border border-dashed border-ink-200 px-3 py-2 text-sm text-ink-400 hover:text-ink-900 hover:border-ink-400"
-        >
-          + Connect {CONNECTORS.find((c) => c.id === selectedSource)?.label}
-        </button>
+        {(() => {
+          const c = CONNECTORS.find((x) => x.id === selectedSource);
+          // `unsupported` (e.g. gmail) — Hyperspell doesn't expose it.
+          // `beta` (e.g. github) — used for code_refs in /plan/generate, not the connect flow.
+          const disabled = c && ("unsupported" in c || "beta" in c);
+          const tooltip =
+            c && "tooltip" in c && typeof c.tooltip === "string" ? c.tooltip : undefined;
+          return (
+            <button
+              onClick={() => startConnect(selectedSource)}
+              disabled={disabled}
+              title={tooltip}
+              className={
+                "mt-3 w-full rounded-lg border border-dashed px-3 py-2 text-sm transition " +
+                (disabled
+                  ? "border-ink-200 text-ink-400 cursor-not-allowed opacity-60"
+                  : "border-ink-200 text-ink-400 hover:text-ink-900 hover:border-ink-400")
+              }
+            >
+              {disabled
+                ? `${c?.label} — ${("unsupported" in (c ?? {})) ? "not supported by Hyperspell" : "beta (used in plan generation)"}`
+                : `+ Connect ${c?.label}`}
+            </button>
+          );
+        })()}
       </aside>
 
       {/* Column 2 — Documents */}

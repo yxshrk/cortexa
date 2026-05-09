@@ -1,0 +1,207 @@
+[
+  {
+    "id": "gggg1111-1111-1111-1111-000000000001",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "linear_ticket",
+    "payload": {
+      "team_id": "ENG",
+      "title": "[bug] Safari login: set Secure + SameSite=None on auth cookie",
+      "priority": 1,
+      "labels": ["bug", "auth", "browser-compat", "p1"],
+      "description": "## What\nSafari 17 drops the auth cookie on the redirect from mail.acme-co.com → app.acme-co.com.\n\n## Why\nAuth cookie does not set Secure or SameSite=None. WebKit's cross-site cookie rules require both.\n\n## Repro\n1. Click magic link in mail.acme-co.com on Safari 17 (private mode, 100% repro).\n2. Lands on app.acme-co.com.\n3. Bounces back to /login because session cookie is not attached.\n\n## Customers blocked\n- Northwind ($200k ARR) — pilot at risk\n- Beacon ($90k ARR) — escalated 2026-05-05\n- 3+ SMB tickets in #bugs since 2026-05-04\n\n## Acceptance\n- [ ] src/auth/redirect.ts sets Secure=true, SameSite=None on the auth cookie.\n- [ ] WebKit Playwright test exercising the cross-subdomain redirect added to CI.\n- [ ] Verified zero Safari login tickets after 48h in prod.\n\n## Refs\n- Slack #bugs root cause: https://acme-co.slack.com/archives/C012ABC34/p1714928400000900\n- Auth Architecture Review: https://docs.google.com/document/d/1aB3cD4eF_auth_architecture_review\n- Feb 2026 postmortem (this regression was already an action item): https://www.notion.so/acme-co/postmortem-safari-feb2026-9f8e7d6c5b4a"
+    },
+    "status": "executed",
+    "external_url": "https://linear.app/acme-co/issue/ENG-2418",
+    "created_at": "2026-05-09T17:33:18Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000002",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "github_pr",
+    "payload": {
+      "owner": "acme-co",
+      "repo": "cortex-web",
+      "base_branch": "main",
+      "head_branch": "fix/safari-auth-cookie",
+      "title": "fix(auth): set Secure + SameSite=None on auth cookie + add WebKit Playwright test",
+      "body": "## Why\nFixes Safari 17 cross-subdomain login bug (ENG-2418). Three customers blocked.\n\n## What\n- src/auth/redirect.ts: set `Secure: true, sameSite: 'none'` on the auth cookie.\n- e2e/auth.webkit.spec.ts: new Playwright test that exercises the magic-link → cross-subdomain redirect in WebKit.\n- playwright.config.ts: add 'webkit' to projects.\n\n## Refs\n- Auth Architecture Review (D1, D2): https://docs.google.com/document/d/1aB3cD4eF_auth_architecture_review\n- Feb 2026 postmortem (Playwright-on-WebKit was already an action item): https://www.notion.so/acme-co/postmortem-safari-feb2026-9f8e7d6c5b4a\n\n## Test plan\n- [x] WebKit test passes locally\n- [x] CI passes against WebKit and Chromium\n- [ ] Verified manually on Safari 17 against staging cookie domain config",
+      "files": [
+        {
+          "path": "src/auth/redirect.ts",
+          "patch_summary": "set Secure=true and sameSite='none' on the auth cookie response"
+        },
+        {
+          "path": "e2e/auth.webkit.spec.ts",
+          "patch_summary": "new test: cross-subdomain magic-link login on WebKit"
+        },
+        {
+          "path": "playwright.config.ts",
+          "patch_summary": "add 'webkit' to project list"
+        }
+      ]
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:19Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000003",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "devin_handoff",
+    "payload": {
+      "title": "Implement Safari auth cookie fix + WebKit Playwright test",
+      "repo": "https://github.com/acme-co/cortex-web",
+      "starting_branch": "main",
+      "task": "1) Open src/auth/redirect.ts and update the auth cookie set to include Secure: true, sameSite: 'none'. 2) Create e2e/auth.webkit.spec.ts that simulates a magic-link click on Safari/WebKit, navigates from mail.acme-co.com to app.acme-co.com, and asserts the user lands on /app (not /login). 3) Update playwright.config.ts to include 'webkit' in projects.\n\nContext: Safari 17 drops the auth cookie on cross-subdomain redirect because Secure + SameSite=None are missing. Repro is 100% in Safari private mode. Three customer escalations open.\n\nDo not merge if the WebKit test does not actually exercise a cross-subdomain redirect — that's the regression we're guarding against. The Feb 2026 postmortem already had this as an action item that wasn't completed.\n\nAcceptance: PR open with all three changes, CI green on both WebKit and Chromium projects.",
+      "session_url_placeholder": "https://app.devin.ai/sessions/<created-on-execute>"
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:20Z"
+  },
+
+  {
+    "id": "gggg1111-1111-1111-1111-000000000004",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "linear_ticket",
+    "payload": {
+      "team_id": "ENG",
+      "title": "[feat] CSV export v2: tuple cursor + NDJSON + column selection (behind flag)",
+      "priority": 2,
+      "labels": ["feature", "exports", "enterprise", "feature-flag"],
+      "description": "## What\nReplace src/api/export/csv.ts with a streaming export that supports:\n- Tuple cursor pagination on (created_at, id)\n- format=csv | ndjson on the same endpoint\n- ?columns=a,b,c whitelist-checked against the export schema\n\n## Why\nNorthwind ($200k ARR) hard-requires NDJSON. v1 OOMs past ~500k rows. 14 Q1 tickets and 3 sales calls all hit the same gaps.\n\n## Sequencing\nLand behind csv_export_v2 feature flag this week. External rollout gated on rate-limit refactor (ENG-2420).\n\n## Acceptance\n- [ ] Streaming export for both csv and ndjson, no full-result-in-memory path.\n- [ ] Tuple cursor (created_at, id) — not single-column created_at.\n- [ ] ?columns= validates against the export schema; unknown columns return 400.\n- [ ] csv_export_v2 feature flag gates the new path; default off.\n- [ ] Northwind internal demo by 2026-05-30 (QBR).\n\n## Refs\n- Spec: https://docs.google.com/document/d/1xK9pP3vL_csv_export_v2_spec\n- PRD: https://www.notion.so/acme-co/csv-v2-prd-fedcba654321\n- Pattern reference: src/api/orders/list.ts (existing tuple cursor)",
+      "blocked_by": ["ENG-2420"]
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:21Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000005",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "github_pr",
+    "payload": {
+      "owner": "acme-co",
+      "repo": "cortex-web",
+      "base_branch": "main",
+      "head_branch": "feat/csv-export-v2",
+      "title": "feat(export): CSV v2 — tuple cursor + NDJSON + column selection (behind csv_export_v2 flag)",
+      "body": "## Why\nNorthwind requires NDJSON. v1 OOMs past ~500k rows. See PRD: https://www.notion.so/acme-co/csv-v2-prd-fedcba654321\n\n## What\n- src/api/export/csv.ts: streaming implementation, no full-result-in-memory path.\n- src/api/export/cursor.ts: new — tuple cursor encoder/decoder for (created_at, id).\n- src/api/export/types.ts: ExportQuery extended with cursor, format, columns.\n- src/lib/featureFlags.ts: csv_export_v2 flag, default off.\n\n## Test plan\n- [x] Unit tests on cursor encode/decode round-trip\n- [x] Integration test: 1.2M-row export streams without OOM\n- [x] NDJSON output validates against jsonschema we share with Northwind\n- [ ] Manual test: feature-flag on for internal accounts only\n\n## Sequencing\nDo not flip the flag externally until rate-limit refactor (#190) is in prod.",
+      "files": [
+        {
+          "path": "src/api/export/csv.ts",
+          "patch_summary": "rewrite to streaming with tuple cursor; format=csv|ndjson; column whitelist"
+        },
+        {
+          "path": "src/api/export/cursor.ts",
+          "patch_summary": "new — encode/decode (created_at, id) cursor"
+        },
+        {
+          "path": "src/api/export/types.ts",
+          "patch_summary": "ExportQuery: add cursor, format, columns"
+        },
+        {
+          "path": "src/lib/featureFlags.ts",
+          "patch_summary": "add csv_export_v2 flag (default off)"
+        }
+      ]
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:22Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000006",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "devin_handoff",
+    "payload": {
+      "title": "Implement CSV export v2 behind feature flag",
+      "repo": "https://github.com/acme-co/cortex-web",
+      "starting_branch": "main",
+      "task": "Implement CSV export v2 per the spec at https://docs.google.com/document/d/1xK9pP3vL_csv_export_v2_spec.\n\nKey decisions already made:\n- Tuple cursor of (created_at, id), NOT single-column created_at. Use src/api/orders/list.ts as the pattern.\n- Both csv and ndjson on the same endpoint via ?format=csv|ndjson.\n- Column selection via ?columns=a,b,c, whitelist-validated against the export schema.\n- All gated behind csv_export_v2 feature flag (default off).\n\nAcceptance: streaming implementation that handles 1M+ rows without OOM, NDJSON output valid per the schema linked in the PRD, feature flag default off.\n\nDo NOT remove or change rate-limit middleware behavior — that work is owned separately and is the ship-blocker for external launch of this feature.",
+      "session_url_placeholder": "https://app.devin.ai/sessions/<created-on-execute>"
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:23Z"
+  },
+
+  {
+    "id": "gggg1111-1111-1111-1111-000000000007",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "linear_ticket",
+    "payload": {
+      "team_id": "ENG",
+      "title": "[infra] Rate-limit middleware → Redis sliding window",
+      "priority": 1,
+      "labels": ["infra", "middleware", "redis", "blocks-csv-v2"],
+      "description": "## What\nReplace the in-process Map in src/middleware/rateLimit.ts with a Redis-backed sliding window (INCR + EXPIRE + atomic Lua check-and-set). RFC approved.\n\n## Why\n- We deploy 2-3x/day. Every deploy resets the limiter, so post-deploy traffic is unbounded.\n- Local CSV v2 testing already trips the limiter, blocking that work.\n- Critical-path blocker for CSV export v2 external launch.\n\n## Decisions already made\n- Redis sliding window (rejected: token bucket + Postgres advisory lock).\n- Reuse existing acme-cortex-prod Redis instance.\n- PR #42 closed; this is a fresh implementation.\n\n## Acceptance\n- [ ] src/middleware/rateLimit.ts uses Redis-backed sliding window with atomic check-and-set.\n- [ ] Behaviorally identical to v1 from a request perspective (same headers, same 429 shape).\n- [ ] rateLimit.test.ts: 'persists across restarts' and 'handles burst correctly' tests pass.\n- [ ] Redis memory headroom verified ≥25% before merge (Lin owns).\n\n## Refs\n- RFC: https://docs.google.com/document/d/1zQ7tR2sN_rate_limit_rfc\n- Closed PR #42 (do not reopen): https://github.com/acme-co/cortex-web/pull/42\n- Upstash memory headroom alert: 60% peak, monitor."
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:24Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000008",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "github_pr",
+    "payload": {
+      "owner": "acme-co",
+      "repo": "cortex-web",
+      "base_branch": "main",
+      "head_branch": "refactor/rate-limit-redis-sliding-window",
+      "title": "refactor(middleware): rate-limit on Redis sliding window (replaces #42)",
+      "body": "## Why\nIn-process windowed counter resets on every deploy (2-3x/day). Internal CSV v2 testing already tripping limits. Blocks CSV v2 external launch.\n\n## What\n- src/middleware/rateLimit.ts: Redis-backed sliding window using INCR + EXPIRE + Lua atomic check-and-set.\n- src/middleware/rateLimit.lua: new — atomic 'is this request allowed' script.\n- src/middleware/rateLimit.test.ts: replace `it.todo` placeholders with real tests for persistence-across-restart and burst behavior.\n\n## Replaces\nCloses #42. Diff in #42 was stale and the test scaffolding wasn't what we wanted.\n\n## Test plan\n- [x] Persistence-across-restart test (kill+restart consumer, limit state survives)\n- [x] Burst test (101 requests in 1s with 100/s limit → 1 request 429s)\n- [ ] Soak test in staging for 24h before flipping in prod\n\n## Refs\nRFC: https://docs.google.com/document/d/1zQ7tR2sN_rate_limit_rfc",
+      "files": [
+        {
+          "path": "src/middleware/rateLimit.ts",
+          "patch_summary": "replace in-process Map with Redis sliding window via INCR + EXPIRE + Lua"
+        },
+        {
+          "path": "src/middleware/rateLimit.lua",
+          "patch_summary": "new — atomic check-and-set script"
+        },
+        {
+          "path": "src/middleware/rateLimit.test.ts",
+          "patch_summary": "replace it.todo with persistence-across-restart and burst tests"
+        }
+      ]
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:25Z"
+  },
+  {
+    "id": "gggg1111-1111-1111-1111-000000000009",
+    "plan_item_id": "pppp1111-1111-1111-1111-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "action_type": "devin_handoff",
+    "payload": {
+      "title": "Re-implement rate-limit middleware on Redis sliding window",
+      "repo": "https://github.com/acme-co/cortex-web",
+      "starting_branch": "main",
+      "task": "Implement Redis-backed sliding-window rate limiter per the RFC at https://docs.google.com/document/d/1zQ7tR2sN_rate_limit_rfc.\n\n1) Rewrite src/middleware/rateLimit.ts to use Redis (INCR + EXPIRE) with a small Lua script for atomicity. Reuse the existing Redis client from src/lib/redis.ts; do not introduce a new dependency.\n\n2) Add src/middleware/rateLimit.lua with the check-and-set logic.\n\n3) In src/middleware/rateLimit.test.ts, replace the existing it.todo placeholders with: a) a test that simulates an instance restart (drop in-process state) and verifies the limiter still enforces correctly, b) a burst test (101 requests in 1s, last one 429s).\n\nDo NOT preserve any of PR #42's diff — that branch is closed because the windowed-counter approach there did not survive restarts.\n\nThe limiter's external behavior (request headers, 429 shape, header values like X-RateLimit-Remaining) must be identical to today's. This is the critical-path blocker for CSV export v2 external launch — keep the surface stable.",
+      "session_url_placeholder": "https://app.devin.ai/sessions/<created-on-execute>"
+    },
+    "status": "draft",
+    "external_url": null,
+    "created_at": "2026-05-09T17:33:26Z"
+  }
+]

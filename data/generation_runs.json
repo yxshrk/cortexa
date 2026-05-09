@@ -1,0 +1,14 @@
+[
+  {
+    "id": "rrrr1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "week_start": "2026-05-04",
+    "idempotency_key": "demo-seed-2026-05-04",
+    "status": "ready",
+    "error": null,
+    "retry_count": 0,
+    "started_at": "2026-05-09T17:32:00Z",
+    "finished_at": "2026-05-09T17:33:14Z",
+    "created_at": "2026-05-09T17:32:00Z"
+  }
+]

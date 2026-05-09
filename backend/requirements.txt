@@ -8,4 +8,5 @@ supabase>=2.9.0
 openai>=1.55.0
 anthropic>=0.40.0
 apscheduler>=3.10.4
-hyperspell>=0.1.0  # NB: actual version TBD; pin from `pip show hyperspell` after first install
+hyperspell>=0.37.0,<1.0.0
+python-multipart>=0.0.20

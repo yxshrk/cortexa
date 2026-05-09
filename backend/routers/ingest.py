@@ -22,17 +22,28 @@ class IngestBody(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    inserted: int
-    skipped_dupes: int
+    upserted: int
     by_source: dict[str, int]
+    errors: dict[str, str] = {}  # {db_source: error_message} for sources that failed
 
 
 # A neutral query that surfaces project planning content. Hyperspell ranks against
 # the user's connected sources without us having to invent specific queries.
+#
+# NOTE: this is the "ranking-supplement" mirror path. The durable mirror (using
+# memories.list per source) is planned in the next PR — see Codex review notes
+# in individual_plan/yash_backend_execution_plan.md §3 ("Make ingestion mirror-first").
 DEFAULT_QUERY = (
     "latest project planning context, decisions, blockers, design docs, "
     "discussions, tasks, bug reports"
 )
+PER_SOURCE_K = 20
+
+# Sources we mirror into project_context. Derived from the canonical
+# Hyperspell↔DB mapping so we never iterate sources Hyperspell doesn't expose.
+# Currently: ('drive', 'notion', 'slack'). Gmail is in our DB enum but not
+# in Hyperspell's integration list; github is code_refs-only, not mirrored.
+DB_SOURCES: tuple[str, ...] = tuple(sorted(hyperspell.HS_TO_DB_SOURCE.values()))
 
 
 @router.post(
@@ -44,7 +55,12 @@ async def ingest_hyperspell(
     body: IngestBody,
     sb: Client = Depends(get_supabase),
 ) -> IngestResponse:
-    """Search Hyperspell across Slack/Drive/Notion/Gmail and UPSERT into project_context.
+    """Search Hyperspell PER SOURCE and UPSERT into project_context.
+
+    Iterating per source (rather than one merged search across all four)
+    prevents Hyperspell's ranker from biasing the result set toward whichever
+    source happens to dominate — without it, a Slack-heavy account could see
+    Drive items disappear from the mirror.
 
     Embeds each item with text-embedding-3-small. Idempotent via the unique
     indexes on (project_id, source, external_id) and (project_id, source, content_hash).
@@ -57,23 +73,39 @@ async def ingest_hyperspell(
     if not project.get("hyperspell_user_id"):
         supabase_writer.set_hyperspell_user_id(sb, body.projectId, user_id)
 
-    # 1) Pull items from Hyperspell
-    try:
-        items = await hyperspell.search(
-            hyperspell_user_id=user_id,
-            query=DEFAULT_QUERY,
-            db_sources=["slack", "drive", "notion", "gmail"],
-            k=20,
-        )
-    except RuntimeError as e:
-        # SDK / key not configured — surface clearly so it's debuggable.
-        raise HTTPException(503, f"hyperspell not available: {e}")
+    # 1) Per-source pulls in parallel. Each one can fail independently.
+    async def _pull(db_src: str) -> tuple[str, list[Any], str | None]:
+        try:
+            items = await hyperspell.search(
+                hyperspell_user_id=user_id,
+                query=DEFAULT_QUERY,
+                db_sources=[db_src],
+                k=PER_SOURCE_K,
+            )
+            return db_src, items, None
+        except RuntimeError as e:
+            return db_src, [], f"sdk/key: {e}"
+        except Exception as e:
+            log.warning("ingest pull failed for %s: %s", db_src, e)
+            return db_src, [], f"{type(e).__name__}: {e}"
 
-    if not items:
-        return IngestResponse(inserted=0, skipped_dupes=0, by_source={})
+    pulls = await asyncio.gather(*[_pull(s) for s in DB_SOURCES])
 
-    # 2) Embed in parallel
-    texts = [it.full_text for it in items]
+    all_items: list[Any] = []
+    by_source: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    for db_src, items, err in pulls:
+        if err:
+            errors[db_src] = err
+        if items:
+            by_source[db_src] = len(items)
+            all_items.extend(items)
+
+    if not all_items:
+        return IngestResponse(upserted=0, by_source={}, errors=errors)
+
+    # 2) Embed in parallel (single batched call)
+    texts = [it.full_text for it in all_items]
     try:
         vectors = await embeddings.embed_many(texts)
     except Exception as e:
@@ -82,8 +114,7 @@ async def ingest_hyperspell(
 
     # 3) Build rows with content_hash for dedup
     rows: list[dict[str, Any]] = []
-    by_source: dict[str, int] = {}
-    for it, vec in zip(items, vectors):
+    for it, vec in zip(all_items, vectors):
         content_hash = hashlib.sha256(it.full_text.encode("utf-8")).hexdigest()
         rows.append(
             {
@@ -101,13 +132,12 @@ async def ingest_hyperspell(
                 "embedding": vec,
             }
         )
-        by_source[it.source] = by_source.get(it.source, 0) + 1
 
     # 4) UPSERT
     counts = supabase_writer.upsert_project_context(sb, rows)
 
     return IngestResponse(
-        inserted=counts["with_external"] + counts["with_hash"],
-        skipped_dupes=0,  # PostgREST doesn't tell us; treat all as upserts
+        upserted=counts["with_external"] + counts["with_hash"],
         by_source=by_source,
+        errors=errors,
     )

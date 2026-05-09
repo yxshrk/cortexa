@@ -1,0 +1,242 @@
+[
+  {
+    "id": "tttt0001-0001-0001-0001-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "speaker": "priya",
+    "start_ms": 0,
+    "end_ms": 14200,
+    "text": "Good morning everyone. Quick standup. I want to flag the Safari login thing from the weekend, support flagged it again Sunday night. We need an owner today.",
+    "ts": "2026-05-04T16:30:08Z"
+  },
+  {
+    "id": "tttt0001-0001-0001-0001-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "speaker": "marco",
+    "start_ms": 14200,
+    "end_ms": 36400,
+    "text": "I can take it. I poked at it Friday, looks like the redirect across our auth subdomain drops the SameSite=None cookie on Safari 17. Reproduces 100 percent in private mode. Need maybe a day.",
+    "ts": "2026-05-04T16:30:30Z"
+  },
+  {
+    "id": "tttt0001-0001-0001-0001-000000000003",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "speaker": "priya",
+    "start_ms": 36400,
+    "end_ms": 58000,
+    "text": "Good. Also CSV export v2, Diane wants it scoped this week so she can show it to the GTM team. Lin is owning the design doc. Lin can you walk us through it tomorrow?",
+    "ts": "2026-05-04T16:30:52Z"
+  },
+  {
+    "id": "tttt0001-0001-0001-0001-000000000004",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "speaker": "lin",
+    "start_ms": 58000,
+    "end_ms": 79500,
+    "text": "Yep doc is mostly done. The blocker is the rate limiter, the v2 export will fan out larger queries and the current rate limit middleware loses state on restart. So we cannot ship export v2 without fixing that first.",
+    "ts": "2026-05-04T16:31:14Z"
+  },
+  {
+    "id": "tttt0001-0001-0001-0001-000000000005",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "speaker": "priya",
+    "start_ms": 79500,
+    "end_ms": 96000,
+    "text": "OK so the chain is rate limiter first, then CSV v2. Marco take Safari, Lin owns CSV doc and rate limiter scoping. I will move the OKR doc accordingly.",
+    "ts": "2026-05-04T16:31:32Z"
+  },
+
+  {
+    "id": "tttt0002-0002-0002-0002-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "lin",
+    "start_ms": 0,
+    "end_ms": 22000,
+    "text": "OK CSV export v2. The current export is in src/api/export/csv.ts, it pulls all rows in one shot and concatenates. It works fine under maybe ten thousand rows, falls over after that.",
+    "ts": "2026-05-05T21:00:23Z"
+  },
+  {
+    "id": "tttt0002-0002-0002-0002-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "lin",
+    "start_ms": 22000,
+    "end_ms": 48000,
+    "text": "v2 needs three things. First, cursor-based pagination so we can stream, never load the full set. Second, format options, customers want both csv and ndjson. Third, column selection. The ExportQuery type already hints at it but the implementation only filters.",
+    "ts": "2026-05-05T21:00:49Z"
+  },
+  {
+    "id": "tttt0002-0002-0002-0002-000000000003",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "marco",
+    "start_ms": 48000,
+    "end_ms": 71000,
+    "text": "Cursor on what column though. Created_at is not unique enough on bursty days, we will skip rows. We should use a tuple cursor of created_at and id, that is what the orders endpoint does.",
+    "ts": "2026-05-05T21:01:12Z"
+  },
+  {
+    "id": "tttt0002-0002-0002-0002-000000000004",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "lin",
+    "start_ms": 71000,
+    "end_ms": 95000,
+    "text": "Agreed. Decision then, tuple cursor of created_at plus id. I will update the spec. We are still gated on the rate limit work, so target ship is end of next week, but I want the implementation merged behind a flag this week.",
+    "ts": "2026-05-05T21:01:35Z"
+  },
+  {
+    "id": "tttt0002-0002-0002-0002-000000000005",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "diane",
+    "start_ms": 95000,
+    "end_ms": 118000,
+    "text": "Sales is going to ask, can we promise this to Northwind by end of month. Be honest with me, is end of month realistic if rate limiter slips.",
+    "ts": "2026-05-05T21:01:58Z"
+  },
+  {
+    "id": "tttt0002-0002-0002-0002-000000000006",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "speaker": "priya",
+    "start_ms": 118000,
+    "end_ms": 142000,
+    "text": "End of month is tight. If rate limiter slips even three days we will not make it. Tell Northwind first half of June, that is the honest answer.",
+    "ts": "2026-05-05T21:02:22Z"
+  },
+
+  {
+    "id": "tttt0003-0003-0003-0003-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "speaker": "marco",
+    "start_ms": 0,
+    "end_ms": 26000,
+    "text": "Confirmed the Safari thing. The repro is, click magic link in mail.acme-co.com, redirect to app.acme-co.com, the session cookie does not get attached because Safari treats it as cross-site and our cookie does not have Secure plus SameSite=None.",
+    "ts": "2026-05-06T18:00:27Z"
+  },
+  {
+    "id": "tttt0003-0003-0003-0003-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "speaker": "marco",
+    "start_ms": 26000,
+    "end_ms": 52000,
+    "text": "The fix is two lines, set Secure plus SameSite=None on the auth cookie in src/auth/redirect.ts. But I want to add a Playwright test that runs in WebKit so we catch this if someone removes it again. We had a similar regression in February.",
+    "ts": "2026-05-06T18:00:53Z"
+  },
+  {
+    "id": "tttt0003-0003-0003-0003-000000000003",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "speaker": "priya",
+    "start_ms": 52000,
+    "end_ms": 76000,
+    "text": "Yes, decision, fix plus WebKit Playwright test as part of the same PR, no merge without the test. Marco can you have the PR up by end of day Wednesday.",
+    "ts": "2026-05-06T18:01:17Z"
+  },
+  {
+    "id": "tttt0003-0003-0003-0003-000000000004",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "speaker": "marco",
+    "start_ms": 76000,
+    "end_ms": 96000,
+    "text": "Yes by end of Wednesday. One concern, our staging cookie domain is different from prod, so the test needs to run against a Safari-like environment that mimics prod. I will figure it out.",
+    "ts": "2026-05-06T18:01:37Z"
+  },
+
+  {
+    "id": "tttt0004-0004-0004-0004-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "speaker": "marco",
+    "start_ms": 0,
+    "end_ms": 18000,
+    "text": "Safari fix is up, PR 188, waiting on review. Playwright test included and passes against WebKit. Should merge today.",
+    "ts": "2026-05-07T16:30:18Z"
+  },
+  {
+    "id": "tttt0004-0004-0004-0004-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "speaker": "lin",
+    "start_ms": 18000,
+    "end_ms": 42000,
+    "text": "CSV doc is final, I shared the design doc link last night. Implementation started, the cursor work is straightforward but I am hitting the rate limit ceiling locally because the middleware does not let me pull a thousand rows in a row.",
+    "ts": "2026-05-07T16:30:42Z"
+  },
+  {
+    "id": "tttt0004-0004-0004-0004-000000000003",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "speaker": "priya",
+    "start_ms": 42000,
+    "end_ms": 64000,
+    "text": "OK that proves the dependency. Lin lets do the rate limit refactor scoping tomorrow afternoon, you Marco and me. Priya open question, do we keep PR 42 or close it and start fresh.",
+    "ts": "2026-05-07T16:31:04Z"
+  },
+  {
+    "id": "tttt0004-0004-0004-0004-000000000004",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "speaker": "marco",
+    "start_ms": 64000,
+    "end_ms": 86000,
+    "text": "PR 42 is nine days stale and the diff has rotted. I vote close and start fresh. The half-finished refactor in there is fine as a sketch but the test scaffolding is not what we want.",
+    "ts": "2026-05-07T16:31:26Z"
+  },
+
+  {
+    "id": "tttt0005-0005-0005-0005-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "speaker": "priya",
+    "start_ms": 0,
+    "end_ms": 22000,
+    "text": "Rate limit refactor scoping. Goal, the limiter must persist across instance restarts because we deploy mid-day and we are losing state every time. Current limiter is in src/middleware/rateLimit.ts, in-memory map only.",
+    "ts": "2026-05-08T23:00:23Z"
+  },
+  {
+    "id": "tttt0005-0005-0005-0005-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "speaker": "lin",
+    "start_ms": 22000,
+    "end_ms": 48000,
+    "text": "Two options. Redis-backed sliding window, low risk, we already run Redis. Or token bucket with a Postgres advisory lock, more elegant but new pattern for us. I lean Redis sliding window because we ship faster.",
+    "ts": "2026-05-08T23:00:49Z"
+  },
+  {
+    "id": "tttt0005-0005-0005-0005-000000000003",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "speaker": "marco",
+    "start_ms": 48000,
+    "end_ms": 70000,
+    "text": "Redis sliding window plus one. Same opinion. We do not need exotic algorithms, we need durability. Decision, Redis sliding window, I can have the PR up Monday.",
+    "ts": "2026-05-08T23:01:11Z"
+  },
+  {
+    "id": "tttt0005-0005-0005-0005-000000000004",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "speaker": "priya",
+    "start_ms": 70000,
+    "end_ms": 92000,
+    "text": "Decision logged. Marco owns it. Open question, do we need to bump our Redis instance size, current is at sixty percent memory headroom. Lin can you check and report back tomorrow.",
+    "ts": "2026-05-08T23:01:33Z"
+  },
+
+  {
+    "id": "tttt0006-0006-0006-0006-000000000001",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000006",
+    "speaker": "priya",
+    "start_ms": 0,
+    "end_ms": 16000,
+    "text": "Quick demo standup. Where are we on Safari, CSV, and the rate limiter. We have customers asking on all three.",
+    "ts": "2026-05-09T17:30:18Z"
+  },
+  {
+    "id": "tttt0006-0006-0006-0006-000000000002",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000006",
+    "speaker": "marco",
+    "start_ms": 16000,
+    "end_ms": 38000,
+    "text": "Safari merged Thursday afternoon, deployed Friday morning, no Safari support tickets since. PR 42 closed. Rate limit redis PR is drafted but not opened, will open Monday.",
+    "ts": "2026-05-09T17:30:42Z"
+  },
+
+  {
+    "id": "tttt9999-9999-9999-9999-000000000001",
+    "meeting_id": "bbbb0002-0002-0002-0002-000000000001",
+    "speaker": "raj",
+    "start_ms": 0,
+    "end_ms": 24000,
+    "text": "Telemetry pipeline sync. Kafka to Snowflake lag is up to seven minutes during peak, we need to either scale the consumer group or add a second one for high-priority topics.",
+    "ts": "2026-05-06T20:00:24Z"
+  }
+]

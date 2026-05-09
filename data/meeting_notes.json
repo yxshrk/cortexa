@@ -1,0 +1,244 @@
+[
+  {
+    "id": "nnnn0001-0001-0001-0001-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "type": "blocker",
+    "text": "Safari login is broken: redirect across mail.acme-co.com → app.acme-co.com drops the session cookie. Reported again by support over the weekend.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000001"},
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000002"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-04T16:31:00Z"
+  },
+  {
+    "id": "nnnn0001-0001-0001-0001-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "type": "action_item",
+    "text": "Marco owns Safari login fix. Targets EOD Wednesday. Suspects SameSite=None / Secure cookie attribute on cross-subdomain redirect.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000002"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-04T16:31:30Z"
+  },
+  {
+    "id": "nnnn0001-0001-0001-0001-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "type": "decision",
+    "text": "Sequencing: rate-limit middleware refactor must land before CSV export v2, because v2 will fan out larger queries and the current limiter loses state on restart.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000004"},
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000005"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-04T16:31:45Z"
+  },
+  {
+    "id": "nnnn0001-0001-0001-0001-000000000004",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000001",
+    "type": "fyi",
+    "text": "Diane wants the CSV export v2 design scoped this week to share with the GTM team.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0001-0001-0001-0001-000000000003"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-04T16:32:00Z"
+  },
+
+  {
+    "id": "nnnn0002-0002-0002-0002-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "type": "decision",
+    "text": "CSV export v2 will use a tuple cursor of (created_at, id) — same pattern as the orders endpoint. Single-column created_at cursor rejected because it skips rows on bursty days.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000003"},
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000004"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-05T21:01:40Z"
+  },
+  {
+    "id": "nnnn0002-0002-0002-0002-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "type": "decision",
+    "text": "CSV v2 scope: cursor pagination + format options (csv | ndjson) + column selection. ExportQuery type already hints at this; only filters are implemented today.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000002"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-05T21:01:50Z"
+  },
+  {
+    "id": "nnnn0002-0002-0002-0002-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "type": "blocker",
+    "text": "CSV v2 ship is gated on rate-limit refactor. If rate-limit slips even 3 days, end-of-month delivery to Northwind is not realistic — promise first half of June instead.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000005"},
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000006"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-05T21:02:25Z"
+  },
+  {
+    "id": "nnnn0002-0002-0002-0002-000000000004",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000002",
+    "type": "action_item",
+    "text": "Lin to merge CSV v2 implementation behind a feature flag this week, even though external launch is gated on rate-limit work.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0002-0002-0002-0002-000000000004"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-05T21:02:40Z"
+  },
+
+  {
+    "id": "nnnn0003-0003-0003-0003-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "type": "mention",
+    "text": "Repro confirmed: magic link in mail.acme-co.com → redirect to app.acme-co.com → Safari treats as cross-site → cookie missing Secure + SameSite=None → no session on the destination domain.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0003-0003-0003-0003-000000000001"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-06T18:00:35Z"
+  },
+  {
+    "id": "nnnn0003-0003-0003-0003-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "type": "decision",
+    "text": "Fix is two lines in src/auth/redirect.ts (Secure + SameSite=None) and a WebKit Playwright test in the same PR — no merge without the regression test.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0003-0003-0003-0003-000000000002"},
+      {"kind": "transcript_chunk", "id": "tttt0003-0003-0003-0003-000000000003"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-06T18:01:25Z"
+  },
+  {
+    "id": "nnnn0003-0003-0003-0003-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000003",
+    "type": "action_item",
+    "text": "Marco to open the Safari fix PR by EOD Wed (2026-05-06), including a WebKit Playwright test that mimics prod cookie domains.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0003-0003-0003-0003-000000000003"},
+      {"kind": "transcript_chunk", "id": "tttt0003-0003-0003-0003-000000000004"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-06T18:01:45Z"
+  },
+
+  {
+    "id": "nnnn0004-0004-0004-0004-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "type": "fyi",
+    "text": "Safari fix PR #188 is up with the WebKit Playwright test. Awaiting review; expected to merge today.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0004-0004-0004-0004-000000000001"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-07T16:30:25Z"
+  },
+  {
+    "id": "nnnn0004-0004-0004-0004-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "type": "blocker",
+    "text": "Local rate-limit ceiling is blocking Lin's CSV v2 cursor work — proves the dependency we already suspected: rate-limit refactor must come first.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0004-0004-0004-0004-000000000002"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-07T16:30:55Z"
+  },
+  {
+    "id": "nnnn0004-0004-0004-0004-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000004",
+    "type": "decision",
+    "text": "Close stale rate-limit PR #42 (9 days old, diff has rotted) and start fresh in the refactor. The half-finished sketch in #42 is fine as inspiration but the tests are not.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0004-0004-0004-0004-000000000003"},
+      {"kind": "transcript_chunk", "id": "tttt0004-0004-0004-0004-000000000004"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-07T16:31:30Z"
+  },
+
+  {
+    "id": "nnnn0005-0005-0005-0005-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "type": "decision",
+    "text": "Rate-limit refactor will use a Redis-backed sliding window. Token bucket + Postgres advisory lock was considered and rejected as too novel for a one-week ship.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0005-0005-0005-0005-000000000002"},
+      {"kind": "transcript_chunk", "id": "tttt0005-0005-0005-0005-000000000003"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-08T23:01:15Z"
+  },
+  {
+    "id": "nnnn0005-0005-0005-0005-000000000002",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "type": "action_item",
+    "text": "Marco owns the rate-limit Redis sliding-window PR; target open Monday 2026-05-11. Replaces src/middleware/rateLimit.ts in-memory map.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0005-0005-0005-0005-000000000003"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-08T23:01:25Z"
+  },
+  {
+    "id": "nnnn0005-0005-0005-0005-000000000003",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000005",
+    "type": "action_item",
+    "text": "Lin to check Redis instance memory headroom (currently ~60%) and report back Friday whether we need to bump the instance size for the new sliding-window keyspace.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0005-0005-0005-0005-000000000004"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-08T23:01:40Z"
+  },
+
+  {
+    "id": "nnnn0006-0006-0006-0006-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "meeting_id": "aaaa0001-0001-0001-0001-000000000006",
+    "type": "fyi",
+    "text": "Safari fix shipped Friday morning, zero new Safari login tickets since. PR #42 closed. Rate-limit Redis PR drafted, opens Monday.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt0006-0006-0006-0006-000000000002"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-09T17:30:50Z"
+  },
+
+  {
+    "id": "nnnn9999-9999-9999-9999-000000000001",
+    "project_id": "22222222-2222-2222-2222-222222222222",
+    "meeting_id": "bbbb0002-0002-0002-0002-000000000001",
+    "type": "blocker",
+    "text": "Kafka → Snowflake lag is hitting 7 min during peak. Need to scale the consumer group or carve high-priority topics into a dedicated group.",
+    "refs_to": [
+      {"kind": "transcript_chunk", "id": "tttt9999-9999-9999-9999-000000000001"}
+    ],
+    "embedding": null,
+    "ts": "2026-05-06T20:00:30Z"
+  }
+]
