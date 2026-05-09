@@ -90,7 +90,10 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   async function startConnect(source: ConnectorId) {
     const r = await fetch(`${FASTAPI_URL}/connect/start`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
+      },
       body: JSON.stringify({ projectId, source }),
     });
     if (!r.ok) {
