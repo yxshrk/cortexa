@@ -16,6 +16,10 @@ You also own the seed corpus content and the demo-day fallback fixtures (paired 
   - `POST /plan/generate` — the linear pipeline. Synthesize → categorize → per-item Hyperspell GitHub → action drafts. Wrapped in `generation_runs` with `(project_id, week_start, idempotency_key)` unique key. REPLACE `plan_items` for the doc on rerun (cascades to `generated_actions`). Auth-gated.
   - `POST /actions/{id}/execute` — dispatch to Linear / GitHub / Devin. UPDATE `external_url` + `status`. Auth-gated.
 - Build `get_code_refs(query)` with Hyperspell GitHub primary and `seed_code_refs.json` fixture fallback.
+- Normalize Hyperspell sources at the backend boundary. Hyperspell source names are `slack`, `notion`, `google_drive`, `google_mail`, and `github`; `project_context.source` stays the shorter DB enum (`slack`, `notion`, `drive`, `gmail`) for Jin's UI.
+- Scope Hyperspell calls with `projects.hyperspell_user_id` by constructing the Hyperspell client/request for that user. Do not assume Hyperspell accepts our Supabase `project_id` as a search parameter unless you add it as metadata/collection filtering.
+- Own a backend compatibility path for Yudong gaps: if `meeting_notes` rows arrive without `embedding`, FastAPI backfills them with `text-embedding-3-small` using the service-role key before `/context/query` relies on pgvector. This keeps live context search working without requiring frontend changes.
+- Own an auth-gated demo seed fallback: a script or backend-only helper can insert the three demo signals as `meeting_notes` + `project_context` rows with embeddings if the voice listener is behind schedule. Normal path still uses Yudong's inserts.
 - APScheduler in-process: `/ingest/hyperspell` every 5 minutes for every project, idempotent. Pause job at 5:55pm so the cron doesn't fire mid-demo.
 - Auth dependency `require_demo_token` on all mutating endpoints. Read endpoints stay public so Yudong's voice agent (no secret holder) can call them.
 - All Supabase writes go through `supabase-py` with the service-role key (bypasses RLS). Never use anon key from backend.
@@ -39,6 +43,7 @@ backend/
   services/
     hyperspell.py               search wrapper for project_context + GitHub
     embeddings.py               openai text-embedding-3-small
+    meeting_note_embeddings.py   service-role backfill for notes missing embeddings
     briefing_builder.py         cached briefing assembly
     synthesizer.py              Claude #1 → knowledge_documents row
     categorizer.py              Claude #2 → plan_items + per-item code_refs
@@ -53,6 +58,9 @@ backend/
     seed_code_refs.json         demo-day fallback if Hyperspell GitHub beta unavailable
   jobs/
     ingest_cron.py              APScheduler job
+    backfill_meeting_notes.py    periodic null-embedding repair
+  scripts/
+    seed_demo_data.py            auth/local-only fallback corpus seeder
   schemas.py                    Pydantic models matching §7 of technical plan
   settings.py                   env vars
 ```
@@ -77,18 +85,32 @@ Frozen response shape: `{ value: string, expires_at: number }`. Frontend (Yudong
 ### `/ingest/hyperspell`
 
 ```python
+HYPERSPELL_SOURCE_TO_DB_SOURCE = {
+    "slack": "slack",
+    "notion": "notion",
+    "google_drive": "drive",
+    "google_mail": "gmail",
+}
+
 async def ingest_hyperspell(project_id: str):
+    project = sb.table("projects").select("hyperspell_user_id").eq(
+        "id", project_id
+    ).single().execute().data
+    hs = hyperspell_for_user(project["hyperspell_user_id"])
+
     inserted, updated, skipped = 0, 0, 0
-    for source in ["slack", "drive", "notion", "gmail"]:
-        items = await hyperspell.memories.search(
-            project_id=project_id, sources=[source], k=20
+    for hs_source, db_source in HYPERSPELL_SOURCE_TO_DB_SOURCE.items():
+        items = await hs.memories.search(
+            query="latest project planning context, bugs, decisions, docs, blockers",
+            sources=[hs_source],
+            k=20,
         )
         for item in items:
             content_hash = sha256(item.full_text.encode()).hexdigest()
             embedding = await embed(item.full_text)
             row = {
                 "project_id": project_id,
-                "source": source,
+                "source": db_source,
                 "external_id": item.external_id,
                 "title": item.title,
                 "snippet": item.snippet[:500],
@@ -100,8 +122,13 @@ async def ingest_hyperspell(project_id: str):
                 "source_updated_at": item.updated_at,
                 "embedding": embedding,
             }
+            conflict = (
+                "project_id,source,external_id"
+                if item.external_id else
+                "project_id,source,content_hash"
+            )
             res = sb.table("project_context").upsert(
-                row, on_conflict="project_id,source,external_id"
+                row, on_conflict=conflict
             ).execute()
             inserted += 1 if res.is_new else 0
     return {"inserted": inserted, "updated": updated, "skipped_dupes": skipped}
@@ -115,6 +142,10 @@ async def context_query(project_id: str, query: str, k: int = 6):
     if cache_key in cache and not stale(cache_key, ttl=60):
         return cache[cache_key]
 
+    # Repair Yudong-owned rows if his first pass inserted notes without embeddings.
+    # Service-role backend owns this compatibility layer; no frontend contract change.
+    await backfill_missing_meeting_note_embeddings(project_id, limit=25)
+
     q_emb = await embed(query)
     # Stage 1: pgvector RPC
     local = sb.rpc("search_context", {
@@ -124,8 +155,12 @@ async def context_query(project_id: str, query: str, k: int = 6):
     # Stage 2: best-effort Hyperspell live
     hs = []
     try:
+        project = sb.table("projects").select("hyperspell_user_id").eq(
+            "id", project_id
+        ).single().execute().data
+        hs_client = hyperspell_for_user(project["hyperspell_user_id"])
         hs = await asyncio.wait_for(
-            hyperspell.memories.search(project_id=project_id, query=query, k=k // 2),
+            hs_client.memories.search(query=query, k=k // 2),
             timeout=0.5,
         )
     except asyncio.TimeoutError:
@@ -136,6 +171,54 @@ async def context_query(project_id: str, query: str, k: int = 6):
     cache[cache_key] = (now(), out)
     return out
 ```
+
+### Meeting note embedding backfill
+
+Yudong's correct contract is still `/api/voice/summarize` returns `embedding` and the frontend inserts it into `meeting_notes`. If that slips, Yash can cover it from the backend without touching Yudong's files.
+
+```python
+async def backfill_missing_meeting_note_embeddings(project_id: str, limit: int = 50):
+    rows = sb.table("meeting_notes").select("id,text").eq(
+        "project_id", project_id
+    ).is_("embedding", "null").limit(limit).execute().data or []
+
+    if not rows:
+        return {"updated": 0}
+
+    vectors = await embed_many([r["text"] for r in rows])
+    for row, vector in zip(rows, vectors):
+        sb.table("meeting_notes").update({
+            "embedding": vector,
+        }).eq("id", row["id"]).execute()
+
+    return {"updated": len(rows)}
+```
+
+Run this in two places:
+
+- At the start of `/context/query`, capped to 25 rows, so live RAG improves as soon as notes exist.
+- As an APScheduler job every 60 seconds for all active projects, so old rows are repaired even if nobody calls `/context/query`.
+
+This is a compatibility layer only. Do not ask Yudong to change ownership boundaries during the hack unless his insert fails entirely.
+
+### Demo seed fallback
+
+If the voice path is not ready by the 1:30pm checkpoint, run a backend-only seed helper that inserts the three scripted demo signals with embeddings:
+
+```bash
+cd backend
+python scripts/seed_demo_data.py --project-id <uuid>
+```
+
+The seed should create:
+
+- one Safari login bug note,
+- one CSV export v2 feature note,
+- one rate-limit maintenance note,
+- matching `project_context` rows from the demo corpus,
+- embeddings for every inserted row.
+
+Keep this behind local execution or `DEMO_TOKEN`. It is a demo safety net, not the main product path.
 
 ### `/plan/generate`
 
@@ -331,6 +414,7 @@ Full request/response shapes frozen in §5 of `project_brain_technical_execution
 - `/context/query` performance test:
   - 10 calls with diverse queries — p95 < 1s.
   - Stage 2 timeout verified by simulating Hyperspell slowness (still returns p1 results).
+  - Insert a `meeting_notes` row with `embedding = null`; call `/context/query`; verify the row receives an embedding and can appear in RPC results.
 - `/plan/generate` idempotency test:
   - Fire two concurrent `curl`s with no idempotency key — first returns 202, second returns 409.
   - Re-run with same week — no duplicate `plan_items` (verify `count(*) = items_per_run`).
@@ -346,16 +430,19 @@ Full request/response shapes frozen in §5 of `project_brain_technical_execution
   - With correct token → 202.
 - APScheduler test:
   - Wait 5 minutes from boot, verify `/ingest/hyperspell` ran via Supabase row count or log line.
+  - Insert three note rows without embeddings; verify the 60s backfill job updates them.
   - `scheduler.pause_job("hs_ingest")` — verify next 5 min interval does not fire.
 - Hyperspell GitHub fallback test:
   - Set `HYPERSPELL_GITHUB_AVAILABLE = False`; verify `get_code_refs` returns fixture matches.
+- Demo seed fallback test:
+  - Run `scripts/seed_demo_data.py --project-id <uuid>`; verify the three demo signals appear in `meeting_notes`, `project_context`, `/context/query`, and `/plan/generate`.
 
 ## Assumptions
 
 - Jin has Supabase v2 schema deployed (per technical plan §6 + migration in `supabase/migration_to_v2.sql`), Realtime publication enabled on the 7 reactive tables, RLS policies applied, and the `search_context` RPC granted to `anon`.
 - Jin has handed over `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` via 1Password.
 - Yudong's `VoiceAgent` calls `/rt/token`, `/context/briefing`, and `/context/query` exactly as defined in §5.
-- Yudong INSERTs into `meeting_notes` directly (anon key) — Yash never sees individual transcript chunks via `/voice/append` (that endpoint does not exist in v2).
+- Yudong INSERTs into `meeting_notes` directly (anon key) — Yash never sees individual transcript chunks via `/voice/append` (that endpoint does not exist in v2). If those rows miss embeddings, Yash's backend repairs them asynchronously.
 - Hyperspell GitHub beta access is **TBD** — verified tonight; if denied, `seed_code_refs.json` fixtures become primary and Hyperspell GitHub becomes the bonus.
 - ngrok or equivalent is providing a stable public URL for FastAPI (ngrok subdomain reserved tonight).
 - Linear sandbox project + GitHub demo repo + pushed feature branch + Devin account are all set up tonight.

@@ -216,3 +216,30 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ─── Next.js / Node / frontend ────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+.swc/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+.pnpm-store/
+
+# ─── Env files (never commit) ─────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# ─── Editor / OS ──────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ─── Demo artifacts ───────────────────────────────────────────
+demo/backup_video.mp4
+demo/seed_corpus/raw/
