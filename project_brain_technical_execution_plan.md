@@ -412,6 +412,8 @@ Two artifacts: the Supabase schema/realtime/RLS, and a tabbed Next.js app.
 
 | Table | What it stores | Who writes |
 |---|---|---|
+| `projects` | project records used by `/projects` and page headers | Seed/admin |
+| `meetings` | internal meeting sessions; `meetings.id` is the `meetingId` passed to `VoiceAgent` | Jin/Yudong seed/setup |
 | `meeting_notes` | structured notes from voice agent (one row per note) — **with `embedding vector(1536)`** | Yudong (anon INSERT) |
 | `meeting_transcript_chunks` | raw transcript chunks for audit (so we can trace a note back to what was said) | Yudong (anon INSERT) |
 | `project_context` | items ingested from Hyperspell — Slack/Drive/Notion/Gmail — **with `embedding vector(1536)`** | Yash (svc INSERT) |
@@ -419,6 +421,8 @@ Two artifacts: the Supabase schema/realtime/RLS, and a tabbed Next.js app.
 | `plan_items` | categorized actionables (bug_fix / new_feature / maintenance), with `code_refs` from Hyperspell GitHub | Yash (svc INSERT, REPLACE per run) |
 | `generated_actions` | Linear / PR / Devin draft per plan item × 3. **Carries denormalized `project_id`** so frontend can filter via Postgres Changes. | Yash (svc INSERT, then UPDATE on execute) |
 | `generation_runs` | run status + idempotency key for `/plan/generate` | Yash (svc) |
+
+> `meetingId` means the internal Supabase `meetings.id`, not a Google Meet ID. For the demo, Jin selects the latest live meeting for the project or uses a pre-seeded row titled `Demo Standup`.
 
 **UI — three tabs** (same as before; see §2 for the layout)
 

@@ -88,6 +88,7 @@ create table meeting_notes (
   ts timestamptz default now()
 );
 create index meeting_notes_project_ts_idx on meeting_notes (project_id, ts desc);
+create index meeting_notes_meeting_id_idx on meeting_notes (meeting_id);
 create index meeting_notes_embedding_idx  on meeting_notes using hnsw (embedding vector_cosine_ops);
 
 -- 6) RAW INPUT 1b: meeting_transcript_chunks (audit trail) --------------------
@@ -186,6 +187,7 @@ create table plan_items (
 );
 create index plan_items_project_idx on plan_items (project_id, generated_at desc);
 create index plan_items_doc_idx     on plan_items (knowledge_document_id);
+create index plan_items_generation_run_id_idx on plan_items (generation_run_id);
 
 -- 11) EXECUTION: generated_actions (now with denormalized project_id) ---------
 
@@ -202,6 +204,7 @@ create table generated_actions (
 );
 create index generated_actions_project_idx on generated_actions (project_id, created_at desc);
 create index generated_actions_item_idx    on generated_actions (plan_item_id);
+create index generated_actions_generation_run_id_idx on generated_actions (generation_run_id);
 
 -- 12) Vector search RPC (used by /context/query) ------------------------------
 
@@ -220,6 +223,7 @@ returns table (
   score float
 )
 language sql stable
+set search_path = public, extensions
 as $$
   with mn as (
     select
@@ -298,6 +302,10 @@ exception when duplicate_object then null; end $$;
 -- RLS policies are checked AFTER base privileges. Postgres requires anon to
 -- have SELECT/INSERT granted on the table before policies even run.
 -- (Supabase's own Realtime + RLS guide does this explicitly.)
+
+revoke all on meeting_notes, meeting_transcript_chunks, project_context,
+              knowledge_documents, plan_items, generated_actions,
+              generation_runs, projects, meetings from anon, authenticated;
 
 grant select on meeting_notes              to anon;
 grant select on meeting_transcript_chunks  to anon;
