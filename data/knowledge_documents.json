@@ -1,0 +1,149 @@
+[
+  {
+    "id": "kkkk1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "week_start": "2026-05-04",
+    "week_end": "2026-05-10",
+    "status": "ready",
+    "summary": "This week the team converged on a single execution chain: Safari login fix → rate-limit middleware refactor → CSV export v2. The Safari bug shipped Friday morning and customer reports stopped immediately. The rate-limit refactor is now the critical path because CSV export v2 cannot launch externally until the limiter survives instance restarts. CSV v2 design is final (tuple cursor + NDJSON + column selection); implementation lands behind a feature flag this week. Northwind ($200k ARR) is the headline customer waiting on CSV v2; expectations have been re-set from end-of-May to first half of June.",
+    "themes": [
+      "Cross-browser auth hardening — Safari was a foreseeable miss; WebKit is now in CI.",
+      "Platform durability — middleware that doesn't survive instance restarts is the limiter on enterprise features.",
+      "CSV export v2 is enterprise-blocking — Northwind is gated, Beacon is gated.",
+      "Stale work needs to be closed, not nursed — PR #42 closed in favor of a fresh refactor.",
+      "Customer commitments are now sequenced honestly — Northwind moved from end-of-May to first half of June."
+    ],
+    "decisions": [
+      {
+        "decision": "Set Secure + SameSite=None on auth cookie and add WebKit to Playwright CI in the same PR (#188).",
+        "made_at": "2026-05-06",
+        "owner": "marco.reyes",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0003-0003-0003-0003-000000000002"},
+          {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000003"}
+        ]
+      },
+      {
+        "decision": "Sequence the work as: rate-limit refactor → CSV v2 external launch. CSV v2 implementation merges this week behind a feature flag in parallel.",
+        "made_at": "2026-05-04",
+        "owner": "priya.patel",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0001-0001-0001-0001-000000000003"},
+          {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000004"}
+        ]
+      },
+      {
+        "decision": "CSV v2 cursor is a tuple of (created_at, id), not single-column created_at — single-column would skip rows on bursty timestamps.",
+        "made_at": "2026-05-05",
+        "owner": "lin.chen",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000001"},
+          {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000001"}
+        ]
+      },
+      {
+        "decision": "Rate-limit refactor uses Redis-backed sliding window; token-bucket + Postgres advisory lock rejected as too novel for a one-week ship.",
+        "made_at": "2026-05-08",
+        "owner": "marco.reyes",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0005-0005-0005-0005-000000000001"},
+          {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000002"}
+        ]
+      },
+      {
+        "decision": "Close stale rate-limit PR #42 and start fresh — diff has rotted, tests aren't what we want.",
+        "made_at": "2026-05-07",
+        "owner": "marco.reyes",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0004-0004-0004-0004-000000000003"},
+          {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000003"}
+        ]
+      },
+      {
+        "decision": "Tell Northwind first half of June for CSV v2, not end of May. Honest sequencing given rate-limit risk.",
+        "made_at": "2026-05-05",
+        "owner": "priya.patel",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000003"},
+          {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000001"}
+        ]
+      }
+    ],
+    "blockers": [
+      {
+        "blocker": "Rate-limit middleware does not survive instance restart, blocking CSV v2 external launch and hitting limits during local CSV v2 testing.",
+        "severity": "high",
+        "owner": "marco.reyes",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0001-0001-0001-0001-000000000003"},
+          {"kind": "meeting_note", "id": "nnnn0004-0004-0004-0004-000000000002"},
+          {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000002"}
+        ]
+      },
+      {
+        "blocker": "Redis instance memory headroom at ~60%; new sliding-window keyspace may push it past the 75% comfort line — Lin to verify Friday.",
+        "severity": "medium",
+        "owner": "lin.chen",
+        "refs": [
+          {"kind": "meeting_note", "id": "nnnn0005-0005-0005-0005-000000000003"},
+          {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000004"}
+        ]
+      },
+      {
+        "blocker": "Feb 2026 Safari postmortem action item 'add WebKit to Playwright CI' was deprioritized last quarter — direct cause of the May Safari outage.",
+        "severity": "medium",
+        "owner": "marco.reyes",
+        "refs": [
+          {"kind": "context", "id": "cccc0001-1111-2222-0000-000000000003"}
+        ]
+      }
+    ],
+    "open_questions": [
+      "Should we collapse mail.acme-co.com and app.acme-co.com onto a single subdomain to eliminate cross-site cookie risk entirely? Deferred from the auth review — too much DNS surface to change mid-incident.",
+      "Do we need to bump the Redis instance size before launching the new sliding window? Lin to confirm by Friday.",
+      "Should we promise Beacon a Safari-fix retro-credit on their pilot? Not raised yet but probably the right move.",
+      "When do we make WebKit a required CI target (vs. nightly)? PR #188 adds it; we haven't decided whether it blocks merges yet."
+    ],
+    "source_meeting_note_ids": [
+      "nnnn0001-0001-0001-0001-000000000001",
+      "nnnn0001-0001-0001-0001-000000000002",
+      "nnnn0001-0001-0001-0001-000000000003",
+      "nnnn0001-0001-0001-0001-000000000004",
+      "nnnn0002-0002-0002-0002-000000000001",
+      "nnnn0002-0002-0002-0002-000000000002",
+      "nnnn0002-0002-0002-0002-000000000003",
+      "nnnn0002-0002-0002-0002-000000000004",
+      "nnnn0003-0003-0003-0003-000000000001",
+      "nnnn0003-0003-0003-0003-000000000002",
+      "nnnn0003-0003-0003-0003-000000000003",
+      "nnnn0004-0004-0004-0004-000000000001",
+      "nnnn0004-0004-0004-0004-000000000002",
+      "nnnn0004-0004-0004-0004-000000000003",
+      "nnnn0005-0005-0005-0005-000000000001",
+      "nnnn0005-0005-0005-0005-000000000002",
+      "nnnn0005-0005-0005-0005-000000000003",
+      "nnnn0006-0006-0006-0006-000000000001"
+    ],
+    "source_project_context_ids": [
+      "cccc0001-1111-0000-0000-000000000001",
+      "cccc0001-1111-0000-0000-000000000002",
+      "cccc0001-1111-0000-0000-000000000003",
+      "cccc0001-1111-0000-0000-000000000004",
+      "cccc0001-1111-0000-0000-000000000005",
+      "cccc0001-1111-0000-0000-000000000006",
+      "cccc0001-1111-1111-0000-000000000001",
+      "cccc0001-1111-1111-0000-000000000002",
+      "cccc0001-1111-1111-0000-000000000003",
+      "cccc0001-1111-1111-0000-000000000004",
+      "cccc0001-1111-2222-0000-000000000001",
+      "cccc0001-1111-2222-0000-000000000002",
+      "cccc0001-1111-2222-0000-000000000003",
+      "cccc0001-1111-2222-0000-000000000004",
+      "cccc0001-1111-3333-0000-000000000001",
+      "cccc0001-1111-3333-0000-000000000002",
+      "cccc0001-1111-3333-0000-000000000003",
+      "cccc0001-1111-3333-0000-000000000004"
+    ],
+    "generated_at": "2026-05-09T17:33:14Z"
+  }
+]

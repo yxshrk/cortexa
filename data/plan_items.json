@@ -1,0 +1,100 @@
+[
+  {
+    "id": "pppp1111-1111-1111-1111-000000000001",
+    "knowledge_document_id": "kkkk1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "category": "bug_fix",
+    "title": "Fix Safari login: missing Secure + SameSite=None on auth cookie",
+    "description": "Safari 17 drops the auth cookie on the redirect from mail.acme-co.com → app.acme-co.com because the cookie does not set Secure or SameSite=None. Reproduces 100% in private mode. Three customers blocked (Northwind, Beacon, multiple SMBs). Fix is two lines in src/auth/redirect.ts. Same PR must add a WebKit-target Playwright test — the Feb 2026 postmortem already had this action item and it was deprioritized.",
+    "source_refs": [
+      {"kind": "meeting_note", "id": "nnnn0001-0001-0001-0001-000000000001", "label": "Standup blocker (May 4)"},
+      {"kind": "meeting_note", "id": "nnnn0003-0003-0003-0003-000000000002", "label": "Triage decision (May 6)"},
+      {"kind": "context", "id": "cccc0001-1111-0000-0000-000000000001", "label": "Slack #bugs (Sara, May 4)"},
+      {"kind": "context", "id": "cccc0001-1111-0000-0000-000000000004", "label": "Slack #bugs (Marco root cause, May 6)"},
+      {"kind": "context", "id": "cccc0001-1111-2222-0000-000000000003", "label": "Notion: Feb 2026 postmortem"},
+      {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000002", "label": "Beacon escalation email"}
+    ],
+    "code_refs": [
+      {
+        "path": "src/auth/redirect.ts",
+        "lines": "44-67",
+        "snippet": "export function handleAuthRedirect(req: Request) {\n  // Safari-specific cookie quirk: SameSite=None requires Secure\n  const cookie = req.headers.get('cookie');\n  // ... known to fail when redirect chain crosses subdomain\n}",
+        "source": "fixture"
+      }
+    ],
+    "next_step": "Open PR with two-line cookie attribute fix in src/auth/redirect.ts AND a WebKit-target Playwright test that exercises the cross-subdomain redirect. Do not merge without the test.",
+    "confidence": 0.92,
+    "generated_at": "2026-05-09T17:33:14Z"
+  },
+  {
+    "id": "pppp1111-1111-1111-1111-000000000002",
+    "knowledge_document_id": "kkkk1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "category": "new_feature",
+    "title": "Implement CSV export v2: tuple cursor + NDJSON + column selection",
+    "description": "Replace src/api/export/csv.ts with a streaming export that uses a (created_at, id) tuple cursor (not single-column created_at — would skip rows on bursty timestamps), supports format=csv|ndjson on the same endpoint, and accepts a whitelisted columns query param. Land behind csv_export_v2 feature flag this week; external launch waits on the rate-limit refactor. Northwind QBR is May 30 — internal demo by then is the bar; first half of June for external.",
+    "source_refs": [
+      {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000001", "label": "Cursor decision"},
+      {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000002", "label": "Scope decision"},
+      {"kind": "meeting_note", "id": "nnnn0002-0002-0002-0002-000000000004", "label": "Feature-flag merge plan"},
+      {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000001", "label": "Drive: CSV v2 spec"},
+      {"kind": "context", "id": "cccc0001-1111-2222-0000-000000000002", "label": "Notion: CSV v2 PRD"},
+      {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000001", "label": "Northwind ETA email"}
+    ],
+    "code_refs": [
+      {
+        "path": "src/api/export/csv.ts",
+        "lines": "1-22",
+        "snippet": "// CSV export v1 — slated for replacement per design doc 'CSV export v2'\nexport async function exportCsv(query: ExportQuery) {\n  const rows = await db.fetch(query);\n  return rows.map(toCsvRow).join('\\n');\n}",
+        "source": "fixture"
+      },
+      {
+        "path": "src/api/export/types.ts",
+        "lines": "5-15",
+        "snippet": "export type ExportQuery = {\n  filters: Record<string, string>;\n  // v2 will add: cursor, format, columns selection\n};",
+        "source": "fixture"
+      }
+    ],
+    "next_step": "Land streaming implementation behind csv_export_v2 feature flag this week. Use src/api/orders/list.ts as the pattern for tuple-cursor pagination. Keep external launch blocked on rate-limit work; demo to Northwind first half of June.",
+    "confidence": 0.84,
+    "generated_at": "2026-05-09T17:33:14Z"
+  },
+  {
+    "id": "pppp1111-1111-1111-1111-000000000003",
+    "knowledge_document_id": "kkkk1111-1111-1111-1111-000000000001",
+    "project_id": "11111111-1111-1111-1111-111111111111",
+    "generation_run_id": "rrrr1111-1111-1111-1111-000000000001",
+    "category": "maintenance",
+    "title": "Refactor rate-limit middleware to Redis-backed sliding window",
+    "description": "src/middleware/rateLimit.ts uses an in-process Map with a windowed counter that resets on every deploy (we deploy 2-3x/day). This already trips during local CSV v2 testing and is the critical blocker for CSV v2 external launch. RFC approved (Redis sliding window with INCR + EXPIRE + small Lua script for atomicity); same Redis instance we already run. Stale PR #42 is being closed and replaced with a fresh PR.",
+    "source_refs": [
+      {"kind": "meeting_note", "id": "nnnn0001-0001-0001-0001-000000000003", "label": "Sequencing decision"},
+      {"kind": "meeting_note", "id": "nnnn0004-0004-0004-0004-000000000003", "label": "Close PR #42"},
+      {"kind": "meeting_note", "id": "nnnn0005-0005-0005-0005-000000000001", "label": "Redis sliding-window decision"},
+      {"kind": "meeting_note", "id": "nnnn0005-0005-0005-0005-000000000002", "label": "Marco owns PR"},
+      {"kind": "context", "id": "cccc0001-1111-0000-0000-000000000003", "label": "Slack #eng PR #42 closure"},
+      {"kind": "context", "id": "cccc0001-1111-1111-0000-000000000002", "label": "Drive: Rate-Limit RFC"},
+      {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000003", "label": "stale-pr-bot alert"},
+      {"kind": "context", "id": "cccc0001-1111-3333-0000-000000000004", "label": "Upstash memory alert"}
+    ],
+    "code_refs": [
+      {
+        "path": "src/middleware/rateLimit.ts",
+        "lines": "12-34",
+        "snippet": "// TODO(yudong): refactor — windowed counter doesn't survive instance restart\nexport const rateLimit = (req: Request) => {\n  const key = req.ip;\n  const count = WINDOW.get(key) ?? 0;\n  // ... half-finished refactor in PR #42\n}",
+        "source": "fixture"
+      },
+      {
+        "path": "src/middleware/rateLimit.test.ts",
+        "lines": "1-18",
+        "snippet": "describe('rateLimit', () => {\n  it.todo('persists across restarts');\n  it.todo('handles burst correctly');\n});",
+        "source": "fixture"
+      }
+    ],
+    "next_step": "Close PR #42. Open a fresh PR Monday 2026-05-11 implementing the Redis sliding window per the approved RFC. Lin to confirm Redis memory headroom by Friday before the new keyspace lands.",
+    "confidence": 0.88,
+    "generated_at": "2026-05-09T17:33:14Z"
+  }
+]
