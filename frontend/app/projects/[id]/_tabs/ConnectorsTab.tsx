@@ -88,20 +88,41 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   const selectedDoc = docsForSource.find((d) => d.id === selectedDocId) ?? docsForSource[0];
 
   async function startConnect(source: ConnectorId) {
-    const r = await fetch(`${FASTAPI_URL}/connect/start`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
-      },
-      body: JSON.stringify({ projectId, source }),
-    });
-    if (!r.ok) {
-      alert(`Connect failed: ${r.status} ${await r.text()}`);
-      return;
+    // Pre-open the window SYNCHRONOUSLY inside the click handler. Browsers
+    // (especially Safari) block window.open() called after an async await,
+    // because they only permit popups in direct response to a user gesture.
+    // We open about:blank now and redirect it once we have the OAuth URL.
+    const popup = window.open("about:blank", "_blank", "noopener,noreferrer");
+
+    try {
+      const r = await fetch(`${FASTAPI_URL}/connect/start`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${process.env.NEXT_PUBLIC_DEMO_TOKEN ?? ""}`,
+        },
+        body: JSON.stringify({ projectId, source }),
+      });
+      if (!r.ok) {
+        popup?.close();
+        alert(`Connect failed: ${r.status} ${await r.text()}`);
+        return;
+      }
+      const { url } = await r.json();
+      if (!url) {
+        popup?.close();
+        return;
+      }
+      if (popup && !popup.closed) {
+        popup.location.href = url;
+      } else {
+        // Popup was blocked despite synchronous open — fall back to same-tab redirect.
+        window.location.href = url;
+      }
+    } catch (e) {
+      popup?.close();
+      alert(`Connect error: ${e instanceof Error ? e.message : String(e)}`);
     }
-    const { url } = await r.json();
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
 
   async function refreshIngest() {
