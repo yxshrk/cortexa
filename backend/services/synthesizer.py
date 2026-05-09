@@ -81,7 +81,10 @@ def _format_inputs(notes: list[dict[str, Any]], context: list[dict[str, Any]]) -
 
 
 async def synthesize(
-    *, notes: list[dict[str, Any]], context: list[dict[str, Any]]
+    *,
+    notes: list[dict[str, Any]],
+    context: list[dict[str, Any]],
+    emit: llm.EmitFn | None = None,
 ) -> dict[str, Any]:
     """Return a partial ``knowledge_documents`` row.
 
@@ -95,9 +98,11 @@ async def synthesize(
             tool_name=TOOL_NAME,
             tool_description="Emit a structured weekly knowledge document.",
             tool_schema=TOOL_SCHEMA,
+            emit=emit,
+            emit_phase="synthesize",
         )
     except Exception as e:
-        log.warning("synthesizer Claude call failed, using empty doc: %s", e)
+        log.warning("synthesizer LLM call failed, using empty doc: %s", e)
         return _empty()
 
     return {

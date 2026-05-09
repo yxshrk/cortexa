@@ -87,7 +87,9 @@ def _format_doc(doc: dict[str, Any]) -> str:
     )
 
 
-async def categorize(doc: dict[str, Any]) -> list[dict[str, Any]]:
+async def categorize(
+    doc: dict[str, Any], *, emit: llm.EmitFn | None = None
+) -> list[dict[str, Any]]:
     """Return a list of partial ``plan_items`` rows.
 
     Caller fills knowledge_document_id, project_id, generation_run_id, code_refs.
@@ -100,9 +102,11 @@ async def categorize(doc: dict[str, Any]) -> list[dict[str, Any]]:
             tool_name=TOOL_NAME,
             tool_description="Emit a list of concrete, categorized plan items.",
             tool_schema=TOOL_SCHEMA,
+            emit=emit,
+            emit_phase="categorize",
         )
     except Exception as e:
-        log.warning("categorizer Claude call failed, returning empty list: %s", e)
+        log.warning("categorizer LLM call failed, returning empty list: %s", e)
         return []
 
     raw_items = out.get("items") or []

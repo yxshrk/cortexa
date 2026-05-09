@@ -1,11 +1,17 @@
 """POST /plan/generate — synthesize → categorize → draft actions.
 
+Asynchronous: the request returns ``{runId, week_start, status:"running"}`` as
+soon as the generation_runs row is written. The pipeline runs in a FastAPI
+background task and persists structured progress events onto
+``generation_runs.progress`` (jsonb array) at every phase. Frontend subscribes
+via Supabase realtime and renders a live trace.
+
 Idempotent via the ``generation_runs_one_active_uniq`` partial unique index:
 at most one row with status in ('queued','running') per (project_id, week_start).
 A second concurrent /plan/generate for the same week trips the index → 409.
 
-On success the run flips to 'ready'; on failure it flips to 'error' and the
-exception bubbles. Re-running for the same week REPLACES the plan_items for
+On success the run flips to ``ready``; on failure it flips to ``error`` with
+``error`` populated. Re-running for the same week REPLACES the plan_items for
 the doc (ON DELETE CASCADE wipes their generated_actions).
 """
 from __future__ import annotations
@@ -16,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from supabase import Client
 
@@ -25,6 +31,7 @@ from services import (
     action_drafter,
     categorizer,
     code_refs,
+    progress,
     supabase_writer,
     synthesizer,
 )
@@ -33,6 +40,15 @@ router = APIRouter(prefix="/plan", tags=["plan"])
 log = logging.getLogger(__name__)
 
 LOOKBACK_DAYS = 7
+
+# Coarse phase weights so the percent advances smoothly across the run.
+# These are rough estimates; the categorize/draft phases scale with item count.
+PCT_LOAD = 5
+PCT_AFTER_LOAD = 10
+PCT_AFTER_SYNTH = 35
+PCT_AFTER_CATEGORIZE = 50
+PCT_BEFORE_FINALIZE = 95
+PCT_DONE = 100
 
 
 # ─── request / response ───────────────────────────────────────────────────────
@@ -49,15 +65,13 @@ class GenerateBody(BaseModel):
 
 class GenerateResponse(BaseModel):
     runId: str
-    knowledgeDocumentId: str
     week_start: str
-    items: int
-    actions: int
+    status: str
+    knowledgeDocumentId: str | None = None
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 def _current_iso_week_bounds() -> tuple[date, date]:
-    """Monday-of-this-week + Sunday-of-this-week (UTC, ISO 8601)."""
     today_utc = datetime.now(timezone.utc).date()
     monday = today_utc - timedelta(days=today_utc.weekday())
     sunday = monday + timedelta(days=6)
@@ -66,8 +80,6 @@ def _current_iso_week_bounds() -> tuple[date, date]:
 
 def _is_unique_violation(err: Exception) -> bool:
     text = repr(err).lower()
-    # Postgres SQLSTATE for unique_violation is 23505; PostgREST also surfaces
-    # the human string. Match either to keep this resilient across SDK versions.
     return "23505" in text or "duplicate key" in text or "unique constraint" in text
 
 
@@ -103,6 +115,10 @@ def _select_existing_run_by_idem(
     return rows[0] if rows else None
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ─── endpoint ─────────────────────────────────────────────────────────────────
 @router.post(
     "/generate",
@@ -110,7 +126,9 @@ def _select_existing_run_by_idem(
     dependencies=[Depends(require_demo_token)],
 )
 async def generate_plan(
-    body: GenerateBody, sb: Client = Depends(get_supabase)
+    body: GenerateBody,
+    bg: BackgroundTasks,
+    sb: Client = Depends(get_supabase),
 ) -> GenerateResponse:
     project = supabase_writer.get_project(sb, body.projectId)
     if not project:
@@ -119,12 +137,17 @@ async def generate_plan(
     week_start, week_end = _current_iso_week_bounds()
     idem_key = body.idempotency_key or str(uuid4())
 
-    # Idempotency: if the same key was used before for this week, return the
-    # finished or in-flight run rather than creating a duplicate.
+    # Idempotency: short-circuit if the same key was used for this week.
     if body.idempotency_key:
         prior = _select_existing_run_by_idem(sb, body.projectId, week_start, idem_key)
         if prior:
-            return _response_for_existing_run(sb, prior, week_start)
+            doc_id = _lookup_existing_doc_id(sb, body.projectId, week_start)
+            return GenerateResponse(
+                runId=str(prior["id"]),
+                week_start=week_start.isoformat(),
+                status=str(prior["status"]),
+                knowledgeDocumentId=doc_id,
+            )
 
     # Insert the run row. Concurrent calls for the same week trip the partial
     # unique index `generation_runs_one_active_uniq` → 23505.
@@ -160,25 +183,80 @@ async def generate_plan(
         log.exception("generation_runs insert failed")
         raise HTTPException(500, f"generation_runs insert failed: {e}")
 
+    # Schedule the pipeline. We hand the BackgroundTask its own Client because
+    # request-scoped dependencies don't survive past response send.
+    bg.add_task(
+        _run_pipeline_safe,
+        project_id=body.projectId,
+        run_id=str(run_id),
+        week_start=week_start,
+        week_end=week_end,
+        hyperspell_user_id=project.get("hyperspell_user_id"),
+    )
+
+    return GenerateResponse(
+        runId=str(run_id),
+        week_start=week_start.isoformat(),
+        status="running",
+        knowledgeDocumentId=None,
+    )
+
+
+# ─── pipeline (background) ────────────────────────────────────────────────────
+async def _run_pipeline_safe(
+    *,
+    project_id: str,
+    run_id: str,
+    week_start: date,
+    week_end: date,
+    hyperspell_user_id: str | None,
+) -> None:
+    """Top-level wrapper that always finalizes the run row, even on crash.
+
+    Builds its own Supabase client because the FastAPI dependency-scoped one
+    is gone by the time this runs.
+    """
+    # `get_supabase()` is lru_cache'd to a singleton, so calling it from the
+    # background task hands back the same client the request used.
+    sb = get_supabase()
+
+    async def emit(event: dict[str, Any]) -> None:
+        progress.append_event(sb, run_id, event)
+
     try:
-        return await _run_pipeline(
+        await emit(
+            {
+                "phase": "load",
+                "kind": "start",
+                "message": "Plan generation started",
+                "percent": 0,
+            }
+        )
+        await _run_pipeline(
             sb=sb,
-            project_id=body.projectId,
-            run_id=str(run_id),
+            project_id=project_id,
+            run_id=run_id,
             week_start=week_start,
             week_end=week_end,
-            hyperspell_user_id=project.get("hyperspell_user_id"),
+            hyperspell_user_id=hyperspell_user_id,
+            emit=emit,
         )
-    except HTTPException:
-        _mark_run_error(sb, run_id, "HTTPException")
-        raise
     except Exception as e:
         log.exception("plan/generate pipeline failed")
-        _mark_run_error(sb, run_id, str(e))
-        raise HTTPException(500, f"plan generation failed: {e}")
+        try:
+            progress.append_event(
+                sb,
+                run_id,
+                {
+                    "phase": "finalize",
+                    "kind": "error",
+                    "message": f"Pipeline failed: {e}",
+                },
+            )
+        finally:
+            _mark_run_error(sb, run_id, str(e))
 
 
-# ─── pipeline ─────────────────────────────────────────────────────────────────
 async def _run_pipeline(
     *,
     sb: Client,
@@ -187,16 +265,34 @@ async def _run_pipeline(
     week_start: date,
     week_end: date,
     hyperspell_user_id: str | None,
-) -> GenerateResponse:
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    ).isoformat()
+    emit,
+) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
+    # ── load ─────────────────────────────────────────────────────────────
     notes = await asyncio.to_thread(_select_notes, sb, project_id, cutoff)
     context = await asyncio.to_thread(_select_context, sb, project_id, cutoff)
+    await emit(
+        {
+            "phase": "load",
+            "kind": "end",
+            "message": f"Loaded {len(notes)} meeting note{_s(notes)} and {len(context)} project_context row{_s(context)}",
+            "percent": PCT_AFTER_LOAD,
+            "extra": {"notes": len(notes), "context": len(context)},
+        }
+    )
 
-    # Step 1: synthesis
-    doc_payload = await synthesizer.synthesize(notes=notes, context=context)
+    # ── synthesize ───────────────────────────────────────────────────────
+    await emit(
+        {
+            "phase": "synthesize",
+            "kind": "start",
+            "message": "Synthesizing weekly summary, themes, decisions, blockers, open questions",
+            "percent": PCT_AFTER_LOAD,
+        }
+    )
+    doc_payload = await synthesizer.synthesize(notes=notes, context=context, emit=emit)
+
     doc_id = await asyncio.to_thread(
         _upsert_knowledge_document,
         sb,
@@ -207,16 +303,59 @@ async def _run_pipeline(
         [n["id"] for n in notes],
         [c["id"] for c in context],
     )
+    await emit(
+        {
+            "phase": "synthesize",
+            "kind": "end",
+            "message": (
+                f"Synthesis ready: "
+                f"{len(doc_payload.get('themes') or [])} theme{_s_n(len(doc_payload.get('themes') or []))}, "
+                f"{len(doc_payload.get('decisions') or [])} decision{_s_n(len(doc_payload.get('decisions') or []))}, "
+                f"{len(doc_payload.get('blockers') or [])} blocker{_s_n(len(doc_payload.get('blockers') or []))}, "
+                f"{len(doc_payload.get('open_questions') or [])} open question{_s_n(len(doc_payload.get('open_questions') or []))}"
+            ),
+            "percent": PCT_AFTER_SYNTH,
+            "extra": {"knowledge_document_id": doc_id},
+        }
+    )
 
-    # Step 2: clear prior plan_items for the doc (CASCADE drops their actions),
-    # then categorize. REPLACE semantics so reruns don't accumulate stale items.
+    # ── categorize ───────────────────────────────────────────────────────
     await asyncio.to_thread(_delete_plan_items_for_doc, sb, doc_id)
+    await emit(
+        {
+            "phase": "categorize",
+            "kind": "start",
+            "message": "Categorizing into bug fixes / new features / maintenance",
+            "percent": PCT_AFTER_SYNTH,
+        }
+    )
+    items = await categorizer.categorize(doc_payload, emit=emit)
+    await emit(
+        {
+            "phase": "categorize",
+            "kind": "end",
+            "message": f"{len(items)} plan item{_s_n(len(items))} drafted",
+            "percent": PCT_AFTER_CATEGORIZE,
+            "extra": {"items": len(items)},
+        }
+    )
 
-    items = await categorizer.categorize(doc_payload)
-
-    inserted_items = 0
+    # ── per-item: code refs + action drafts ──────────────────────────────
     inserted_actions = 0
-    for item in items:
+    for idx, item in enumerate(items):
+        item_pct = PCT_AFTER_CATEGORIZE + int(
+            (PCT_BEFORE_FINALIZE - PCT_AFTER_CATEGORIZE) * (idx / max(len(items), 1))
+        )
+        await emit(
+            {
+                "phase": "draft_actions",
+                "kind": "progress",
+                "message": f"Drafting actions for: {item.get('title') or '(untitled)'}",
+                "percent": item_pct,
+                "extra": {"index": idx, "total": len(items)},
+            }
+        )
+
         refs = await code_refs.get_code_refs(
             query=item.get("code_query", ""),
             hyperspell_user_id=hyperspell_user_id,
@@ -238,13 +377,20 @@ async def _run_pipeline(
             plan_item_id = (r.data or [{}])[0].get("id")
         except Exception as e:  # noqa: BLE001
             log.warning("plan_items insert failed: %s", e)
+            await emit(
+                {
+                    "phase": "draft_actions",
+                    "kind": "error",
+                    "message": f"plan_items insert failed: {e}",
+                }
+            )
             continue
         if not plan_item_id:
             continue
-        inserted_items += 1
 
-        # Step 3: drafts (Claude #3) → generated_actions
-        drafts = await action_drafter.draft_actions(item=item, code_refs=refs)
+        drafts = await action_drafter.draft_actions(
+            item=item, code_refs=refs, emit=emit
+        )
         for draft in drafts:
             try:
                 sb.table("generated_actions").insert(
@@ -261,16 +407,23 @@ async def _run_pipeline(
             except Exception as e:  # noqa: BLE001
                 log.warning("generated_actions insert failed: %s", e)
 
-    # Mark doc + run ready
+    # ── finalize ─────────────────────────────────────────────────────────
     await asyncio.to_thread(_finish_doc, sb, doc_id)
     await asyncio.to_thread(_finish_run, sb, run_id)
-
-    return GenerateResponse(
-        runId=str(run_id),
-        knowledgeDocumentId=str(doc_id),
-        week_start=week_start.isoformat(),
-        items=inserted_items,
-        actions=inserted_actions,
+    await progress.append_event_async(
+        sb,
+        run_id,
+        {
+            "phase": "finalize",
+            "kind": "end",
+            "message": f"Done. {len(items)} plan item{_s_n(len(items))}, {inserted_actions} action draft{_s_n(inserted_actions)}.",
+            "percent": PCT_DONE,
+            "extra": {
+                "items": len(items),
+                "actions": inserted_actions,
+                "knowledge_document_id": doc_id,
+            },
+        },
     )
 
 
@@ -310,11 +463,6 @@ def _upsert_knowledge_document(
     note_ids: list[str],
     context_ids: list[str],
 ) -> str:
-    """Upsert by (project_id, week_start) → ``knowledge_documents_week_uniq``.
-
-    PostgREST CAN target this index by columns since it's a TOTAL unique index
-    (no partial predicate). Returns the doc id.
-    """
     row = {
         "project_id": project_id,
         "week_start": week_start.isoformat(),
@@ -335,7 +483,6 @@ def _upsert_knowledge_document(
     )
     rows = r.data or []
     if not rows:
-        # Defensive: fetch by (project, week_start) if the upsert didn't return.
         r2 = (
             sb.table("knowledge_documents")
             .select("id")
@@ -373,11 +520,9 @@ def _mark_run_error(sb: Client, run_id: str | UUID, msg: str) -> None:
         log.warning("failed to mark generation_runs.error: %s", e)
 
 
-def _response_for_existing_run(
-    sb: Client, run: dict[str, Any], week_start: date
-) -> GenerateResponse:
-    """Build a 200 response for a prior idempotent run (don't redo the work)."""
-    project_id = run["project_id"]
+def _lookup_existing_doc_id(
+    sb: Client, project_id: str, week_start: date
+) -> str | None:
     r = (
         sb.table("knowledge_documents")
         .select("id")
@@ -387,29 +532,12 @@ def _response_for_existing_run(
         .execute()
     )
     rows = r.data or []
-    doc_id = rows[0]["id"] if rows else ""
-
-    # Counts straight off the run.
-    pi = (
-        sb.table("plan_items")
-        .select("id", count="exact")
-        .eq("generation_run_id", run["id"])
-        .execute()
-    )
-    ga = (
-        sb.table("generated_actions")
-        .select("id", count="exact")
-        .eq("generation_run_id", run["id"])
-        .execute()
-    )
-    return GenerateResponse(
-        runId=str(run["id"]),
-        knowledgeDocumentId=str(doc_id),
-        week_start=week_start.isoformat(),
-        items=int(pi.count or 0),
-        actions=int(ga.count or 0),
-    )
+    return rows[0]["id"] if rows else None
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _s(arr: list[Any]) -> str:
+    return "" if len(arr) == 1 else "s"
+
+
+def _s_n(n: int) -> str:
+    return "" if n == 1 else "s"
