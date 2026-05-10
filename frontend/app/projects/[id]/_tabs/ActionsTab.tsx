@@ -425,17 +425,42 @@ function ActionCard({
   );
 }
 
+// Payload renders a small per-type preview inside each action card.
+// The action_drafter (backend/services/action_drafter.py) emits
+// {branch, files_to_touch[]} for github_pr and {acceptance_criteria[]} for
+// devin_handoff, but the demo seed uses a richer shape ({head_branch,
+// files: [{path, patch_summary}]}, {task, starting_branch}). We accept both
+// so cards render the same way regardless of which path produced the row.
 function Payload({ payload, type }: { payload: Record<string, unknown>; type: ActionType }) {
   if (type === "github_pr") {
-    const branch = String((payload as { branch?: unknown }).branch ?? "");
-    const files = (payload as { files_to_touch?: unknown }).files_to_touch;
+    const p = payload as {
+      branch?: unknown;
+      head_branch?: unknown;
+      files_to_touch?: unknown;
+      files?: unknown;
+    };
+    const branch = String(p.branch ?? p.head_branch ?? "");
+    const rawFiles = Array.isArray(p.files_to_touch)
+      ? p.files_to_touch
+      : Array.isArray(p.files)
+        ? p.files
+        : [];
+    const fileNames = rawFiles
+      .map((f) =>
+        typeof f === "string"
+          ? f
+          : f && typeof f === "object" && typeof (f as { path?: unknown }).path === "string"
+            ? (f as { path: string }).path
+            : "",
+      )
+      .filter(Boolean);
     return (
       <div className="text-[11px] text-ink-400 space-y-0.5 font-mono">
         {branch && <div>branch: {branch}</div>}
-        {Array.isArray(files) && files.length > 0 && (
+        {fileNames.length > 0 && (
           <div className="break-all">
-            files: {(files as unknown[]).slice(0, 2).join(", ")}
-            {files.length > 2 && ` +${files.length - 2}`}
+            files: {fileNames.slice(0, 2).join(", ")}
+            {fileNames.length > 2 && ` +${fileNames.length - 2}`}
           </div>
         )}
       </div>
@@ -457,7 +482,12 @@ function Payload({ payload, type }: { payload: Record<string, unknown>; type: Ac
     );
   }
   if (type === "devin_handoff") {
-    const ac = (payload as { acceptance_criteria?: unknown }).acceptance_criteria;
+    const p = payload as {
+      acceptance_criteria?: unknown;
+      starting_branch?: unknown;
+      repo?: unknown;
+    };
+    const ac = p.acceptance_criteria;
     if (Array.isArray(ac) && ac.length > 0) {
       return (
         <details className="text-[11px] text-ink-400">
@@ -472,6 +502,17 @@ function Payload({ payload, type }: { payload: Record<string, unknown>; type: Ac
             ))}
           </ul>
         </details>
+      );
+    }
+    // Seed-shape fallback: surface starting_branch + repo so the card isn't blank.
+    const startBranch = typeof p.starting_branch === "string" ? p.starting_branch : "";
+    const repo = typeof p.repo === "string" ? p.repo : "";
+    if (startBranch || repo) {
+      return (
+        <div className="text-[11px] text-ink-400 space-y-0.5 font-mono">
+          {repo && <div>repo: {repo}</div>}
+          {startBranch && <div>from: {startBranch}</div>}
+        </div>
       );
     }
   }
