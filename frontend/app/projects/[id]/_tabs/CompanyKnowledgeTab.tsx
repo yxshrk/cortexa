@@ -10,13 +10,13 @@ const MODES: { id: SubMode; label: string; icon: string; blurb: string }[] = [
   {
     id: "connectors",
     label: "Connectors",
-    icon: "↔",
+    icon: "🔌",
     blurb: "Async knowledge. Slack, Drive, Notion, GitHub — pulled via Hyperspell on a 5-min cron.",
   },
   {
     id: "meetings",
     label: "Meeting Notes",
-    icon: "◌",
+    icon: "🎙️",
     blurb: "Live knowledge. Captured by the voice agent during meetings and saved as structured notes.",
   },
 ];

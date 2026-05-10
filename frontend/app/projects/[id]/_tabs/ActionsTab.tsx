@@ -32,7 +32,7 @@ const ACTION_META: Record<ActionType, { label: string; emoji: string; tone: stri
 
 const CATEGORY_EMOJI: Record<PlanItemRef["category"], string> = {
   bug_fix: "🐛",
-  new_feature: "＋",
+  new_feature: "✨",
   maintenance: "🔧",
 };
 

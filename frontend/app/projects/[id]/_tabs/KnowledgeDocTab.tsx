@@ -65,8 +65,8 @@ const CATEGORY_META: Record<
   },
   new_feature: {
     label: "new_feature",
-    emoji: "＋",
-    tone: "border-ink-200 bg-ink-50 text-ink-900",
+    emoji: "✨",
+    tone: "border-violet-200 bg-violet-50 text-violet-900",
     hint: "From decisions + meeting asks",
   },
   maintenance: {
