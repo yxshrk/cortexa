@@ -316,9 +316,9 @@ export function VoiceAgent({
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(260px,320px)_1fr]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
         <BriefingPanel briefing={briefing} />
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <div className="flex gap-2">
             <input
               value={manualQuery}

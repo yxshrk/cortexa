@@ -264,14 +264,22 @@ def _enrich_meeting_rows(sb: Client, rows: list[dict[str, Any]]) -> list[dict[st
     meeting_ids = [r.get("id") for r in rows if r.get("source") == "meeting" and r.get("id")]
     if not meeting_ids:
         return rows
+    # PostgREST encodes .in_(...) into a URL query param (`id=in.(uuid,uuid,…)`)
+    # which has an implicit length cap (~2KB across most Supabase proxies). 36-char
+    # UUIDs at ~40B encoded each blow past that around ~50 ids. Chunk to be safe.
+    type_by_id: dict[str, Any] = {}
+    BATCH = 50
     try:
-        r = (
-            sb.table("meeting_notes")
-            .select("id,type")
-            .in_("id", meeting_ids)
-            .execute()
-        )
-        type_by_id = {str(x.get("id")): x.get("type") for x in (r.data or [])}
+        for i in range(0, len(meeting_ids), BATCH):
+            batch = meeting_ids[i : i + BATCH]
+            r = (
+                sb.table("meeting_notes")
+                .select("id,type")
+                .in_("id", batch)
+                .execute()
+            )
+            for x in r.data or []:
+                type_by_id[str(x.get("id"))] = x.get("type")
     except Exception as e:  # noqa: BLE001
         log.warning("/context/query: meeting enrichment failed: %s", e)
         return rows

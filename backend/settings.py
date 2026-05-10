@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     env: str = Field(default="dev", alias="ENV")
     port: int = Field(default=8000, alias="PORT")
     cors_origins: str = Field(
-        default="http://localhost:3000",
+        default="http://localhost:3000,http://localhost:3001",
         alias="CORS_ORIGINS",
     )
 
