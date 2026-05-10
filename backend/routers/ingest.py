@@ -15,21 +15,75 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from datetime import date, datetime, timezone
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import Client
 
 from dependencies import get_supabase, require_demo_token
-from services import embeddings, hyperspell, supabase_writer
+from services import embeddings, hyperspell, progress, supabase_writer
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 log = logging.getLogger(__name__)
 
+# Coarse phase weights so the bar advances smoothly during a run. The chunking
+# itself is CPU-cheap; the slow bits are network (Hyperspell pulls + OpenAI
+# embed + Supabase upsert), so phase-based percent tracks user-perceived time.
+PCT_LOAD_START = 5
+PCT_LOAD_END = 55
+PCT_EMBED_START = 60
+PCT_EMBED_END = 80
+PCT_UPSERT_END = 95
+PCT_DONE = 100
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_unique_violation(err: Exception) -> bool:
+    text = repr(err).lower()
+    return "23505" in text or "duplicate key" in text or "unique constraint" in text
+
 
 class IngestBody(BaseModel):
     projectId: str
+
+
+class IngestStartResponse(BaseModel):
+    runId: str
+    status: str
+    started_at: str
+
+
+class DeleteDocumentResponse(BaseModel):
+    deleted: bool
+    id: str
+
+
+@router.delete(
+    "/document/{document_id}",
+    response_model=DeleteDocumentResponse,
+    dependencies=[Depends(require_demo_token)],
+)
+def delete_project_context_document(
+    document_id: str,
+    sb: Client = Depends(get_supabase),
+) -> DeleteDocumentResponse:
+    """Delete a single project_context row.
+
+    Service-role only so RLS doesn't block, and we can confirm the row
+    existed before reporting success. Re-running ingest will re-pull it
+    from Hyperspell, which is the intended escape hatch.
+    """
+    existing = sb.table("project_context").select("id").eq("id", document_id).limit(1).execute()
+    if not (existing.data or []):
+        raise HTTPException(404, f"document {document_id} not found")
+    sb.table("project_context").delete().eq("id", document_id).execute()
+    return DeleteDocumentResponse(deleted=True, id=document_id)
 
 
 class IngestResponse(BaseModel):

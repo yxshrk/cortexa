@@ -66,10 +66,9 @@ values ('Demo', 'https://github.com/<owner>/<repo>', 'pri-demo');`}
               className="block rounded-xl border border-ink-200 bg-white p-5 hover:border-ink-400 transition"
             >
               <div className="text-lg font-semibold">{p.name}</div>
-              <div className="text-sm text-ink-400">
-                {p.repo_url ?? "no repo"} ·{" "}
-                {p.hyperspell_user_id ?? "no Hyperspell user"}
-              </div>
+              {p.repo_url && (
+                <div className="text-sm text-ink-400 truncate">{p.repo_url}</div>
+              )}
             </Link>
           </li>
         ))}

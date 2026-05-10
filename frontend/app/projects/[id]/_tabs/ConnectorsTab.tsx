@@ -123,6 +123,8 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   // Track in-flight ingest so the popup-watcher and the "just_connected"
   // bootstrap path never double-fire.
   const ingestInFlight = useRef(false);
+  const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
+  const [revoking, setRevoking] = useState<ConnectorId | null>(null);
 
   async function refreshIngest() {
     if (ingestInFlight.current) return;
@@ -164,6 +166,63 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
       });
     } finally {
       ingestInFlight.current = false;
+    }
+  }
+
+  async function deleteDocument(doc: ProjectContext) {
+    if (deletingIds[doc.id]) return;
+    if (!window.confirm(`Delete "${doc.title ?? "(untitled)"}"? Re-syncing will pull it back from ${doc.source}.`)) {
+      return;
+    }
+    setDeletingIds((m) => ({ ...m, [doc.id]: true }));
+    // Optimistic remove; realtime DELETE will reconcile.
+    setDocs((prev) => prev.filter((d) => d.id !== doc.id));
+    if (selectedDocId === doc.id) setSelectedDocId(null);
+    try {
+      const r = await fetch(`${FASTAPI_URL}/ingest/document/${doc.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        // Roll back optimistic remove on failure.
+        setDocs((prev) => (prev.some((d) => d.id === doc.id) ? prev : [doc, ...prev]));
+        alert(`Delete failed: ${extractErrorMessage(text) || r.statusText}`);
+      }
+    } catch (e) {
+      setDocs((prev) => (prev.some((d) => d.id === doc.id) ? prev : [doc, ...prev]));
+      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeletingIds((m) => {
+        const n = { ...m };
+        delete n[doc.id];
+        return n;
+      });
+    }
+  }
+
+  async function disconnectSource(source: ConnectorId) {
+    if (revoking) return;
+    if (!window.confirm(`Disconnect ${source}? You'll need to OAuth again to re-pull.`)) return;
+    setRevoking(source);
+    try {
+      const r = await fetch(`${FASTAPI_URL}/connect/revoke`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ projectId, source }),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        alert(`Disconnect failed: ${extractErrorMessage(text) || r.statusText}`);
+        return;
+      }
+      // Re-fetch status (cache-busted on the backend by /connect/revoke).
+      const s = await fetch(`${FASTAPI_URL}/connect/status?projectId=${projectId}`);
+      if (s.ok) setStatuses(await s.json());
+    } catch (e) {
+      alert(`Disconnect failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRevoking(null);
     }
   }
 
@@ -318,21 +377,48 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
           const disabled = c && ("unsupported" in c || "beta" in c);
           const tooltip =
             c && "tooltip" in c && typeof c.tooltip === "string" ? c.tooltip : undefined;
+          const status = statuses?.[selectedSource] ?? "not_connected";
+          const isConnected = status === "connected";
+
+          if (disabled) {
+            return (
+              <button
+                disabled
+                title={tooltip}
+                className="mt-3 w-full rounded-lg border border-dashed border-ink-200 px-3 py-2 text-sm text-ink-400 cursor-not-allowed opacity-60"
+              >
+                {c?.label} — {("unsupported" in (c ?? {})) ? "not supported by Hyperspell" : "beta (used in plan generation)"}
+              </button>
+            );
+          }
+          if (isConnected) {
+            const isRevoking = revoking === selectedSource;
+            const isSyncing = ingestResult.kind === "running";
+            return (
+              <div className="mt-3 space-y-1.5">
+                <button
+                  onClick={refreshIngest}
+                  disabled={isSyncing}
+                  className="w-full rounded-lg bg-ink-900 text-white px-3 py-2 text-sm hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSyncing ? "Syncing…" : `🔄 Sync ${c?.label}`}
+                </button>
+                <button
+                  onClick={() => disconnectSource(selectedSource)}
+                  disabled={isRevoking}
+                  className="w-full rounded-lg border border-ink-200 px-3 py-2 text-xs text-ink-600 hover:text-rose-700 hover:border-rose-300 disabled:opacity-50"
+                >
+                  {isRevoking ? "Disconnecting…" : `Disconnect ${c?.label}`}
+                </button>
+              </div>
+            );
+          }
           return (
             <button
               onClick={() => startConnect(selectedSource)}
-              disabled={disabled}
-              title={tooltip}
-              className={
-                "mt-3 w-full rounded-lg border border-dashed px-3 py-2 text-sm transition " +
-                (disabled
-                  ? "border-ink-200 text-ink-400 cursor-not-allowed opacity-60"
-                  : "border-ink-200 text-ink-400 hover:text-ink-900 hover:border-ink-400")
-              }
+              className="mt-3 w-full rounded-lg border border-dashed border-ink-200 px-3 py-2 text-sm text-ink-400 hover:text-ink-900 hover:border-ink-400 transition"
             >
-              {disabled
-                ? `${c?.label} — ${("unsupported" in (c ?? {})) ? "not supported by Hyperspell" : "beta (used in plan generation)"}`
-                : `+ Connect ${c?.label}`}
+              + Connect {c?.label}
             </button>
           );
         })()}
@@ -350,27 +436,42 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         <ul className="space-y-2">
           {docsForSource.map((d) => {
             const active = (selectedDoc?.id ?? null) === d.id;
+            const isDeleting = !!deletingIds[d.id];
             return (
               <li key={d.id}>
-                <button
-                  onClick={() => setSelectedDocId(d.id)}
+                <div
                   className={
-                    "w-full text-left rounded-lg border p-3 transition " +
-                    (active
-                      ? "border-ink-900 bg-ink-50"
-                      : "border-ink-200 hover:border-ink-400")
+                    "group relative rounded-lg border p-3 transition " +
+                    (active ? "border-ink-900 bg-ink-50" : "border-ink-200 hover:border-ink-400")
                   }
                 >
-                  <div className="flex items-center gap-2 mb-1">
-                    <SourceBadge source={d.source} />
-                    {d.embedding && <span title="embedded" className="text-emerald-600 text-xs">✓ embedded</span>}
-                  </div>
-                  <div className="font-medium truncate">{d.title ?? d.snippet?.slice(0, 60) ?? "(untitled)"}</div>
-                  <div className="text-xs text-ink-400 truncate">
-                    {d.author ? `${d.author} · ` : ""}
-                    {new Date(d.source_updated_at ?? d.ts).toLocaleString()}
-                  </div>
-                </button>
+                  <button
+                    onClick={() => setSelectedDocId(d.id)}
+                    className="w-full text-left pr-7"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <SourceBadge source={d.source} />
+                      {d.embedding && <span title="embedded" className="text-emerald-600 text-xs">✓ embedded</span>}
+                    </div>
+                    <div className="font-medium truncate">{d.title ?? d.snippet?.slice(0, 60) ?? "(untitled)"}</div>
+                    <div className="text-xs text-ink-400 truncate">
+                      {d.author ? `${d.author} · ` : ""}
+                      {new Date(d.source_updated_at ?? d.ts).toLocaleString()}
+                    </div>
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteDocument(d);
+                    }}
+                    disabled={isDeleting}
+                    title="Delete this document"
+                    className="absolute top-2 right-2 h-6 w-6 inline-flex items-center justify-center rounded-md text-ink-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-700 transition disabled:opacity-50"
+                    aria-label="Delete document"
+                  >
+                    {isDeleting ? "…" : "×"}
+                  </button>
+                </div>
               </li>
             );
           })}
@@ -391,10 +492,7 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-indigo-300/40 blur-2xl" />
               <div className="pointer-events-none absolute -bottom-10 -left-8 h-24 w-24 rounded-full bg-cyan-300/40 blur-2xl" />
               <div className="relative z-10">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700">
-                    Chunking Aura
-                  </span>
+                <div className="mb-2 flex items-center justify-end">
                   <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] text-indigo-700 shadow-sm">
                     {chunkPreview.length} preview chunks
                   </span>
@@ -603,3 +701,4 @@ function buildChunkPreview(text: string | null): Array<{ text: string; chars: nu
     chars: block.length,
   }));
 }
+
