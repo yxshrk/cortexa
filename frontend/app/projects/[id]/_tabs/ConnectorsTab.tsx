@@ -180,7 +180,9 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   // returns 0 docs, or when rows were seeded straight into project_context.
   const liveChunkRatio = useMemo<number | null>(() => {
     if (docsForSource.length === 0) return null;
-    const embedded = docsForSource.filter((d) => Array.isArray(d.embedding)).length;
+    // Truthy match (mirrors the per-row "✓ embedded" badge below) so the count
+    // stays correct regardless of whether pgvector serializes as array or string.
+    const embedded = docsForSource.filter((d) => Boolean(d.embedding)).length;
     return embedded / docsForSource.length;
   }, [docsForSource]);
 
