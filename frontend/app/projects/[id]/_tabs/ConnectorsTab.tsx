@@ -440,19 +440,19 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     <div className="grid grid-cols-12 gap-4 min-h-[calc(100vh-320px)]">
       {/* Column 1 — Connectors */}
       <aside className="col-span-3 rounded-xl border border-ink-200 bg-white p-3">
-        <div className="flex items-center justify-between mb-2 px-1">
-          <h2 className="text-xs font-semibold uppercase text-ink-400 tracking-wide">
+        <div className="flex items-center justify-between mb-3 px-1">
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400">
             Connectors
           </h2>
           <button
             onClick={refreshIngest}
-            className="text-xs text-ink-400 hover:text-ink-900"
+            className="text-ink-400 hover:text-ink-900 transition-colors duration-150 text-sm"
             title="Force /ingest/hyperspell"
           >
             🔄
           </button>
         </div>
-        <ul className="space-y-1">
+        <ul className="space-y-0.5">
           {CONNECTORS.map((c) => {
             const status = statuses?.[c.id] ?? "not_connected";
             const active = selectedSource === c.id;
@@ -464,15 +464,15 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
                     setSelectedDocId(null);
                   }}
                   className={
-                    "w-full text-left rounded-lg px-3 py-2 flex items-center justify-between transition " +
+                    "w-full text-left rounded-lg px-3 py-2 flex items-center justify-between transition-colors duration-150 " +
                     (active
                       ? "bg-ink-900 text-white"
                       : "hover:bg-ink-100 text-ink-900")
                   }
                 >
                   <span className="flex items-center gap-2">
-                    <span>{c.emoji}</span>
-                    <span className="font-medium">{c.label}</span>
+                    <span className="text-[15px]">{c.emoji}</span>
+                    <span className="text-[13px] font-medium">{c.label}</span>
                   </span>
                   <StatusPill status={status} dark={active} />
                 </button>
@@ -526,9 +526,18 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
           return (
             <button
               onClick={() => startConnect(selectedSource)}
-              className="mt-3 w-full rounded-lg border border-dashed border-ink-200 px-3 py-2 text-sm text-ink-400 hover:text-ink-900 hover:border-ink-400 transition"
+              disabled={disabled}
+              title={tooltip}
+              className={
+                "mt-3 w-full rounded-lg border px-3 py-2 text-[13px] transition-colors duration-150 " +
+                (disabled
+                  ? "border-ink-200 text-ink-400 cursor-not-allowed opacity-50"
+                  : "border-dashed border-ink-300 text-ink-500 hover:text-ink-900 hover:border-ink-500 hover:bg-ink-50")
+              }
             >
-              + Connect {c?.label}
+              {disabled
+                ? `${c?.label} — ${("unsupported" in (c ?? {})) ? "not supported" : "beta"}`
+                : `+ Connect ${c?.label}`}
             </button>
           );
         })()}
@@ -536,14 +545,14 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
 
       {/* Column 2 — Documents */}
       <section className="col-span-5 rounded-xl border border-ink-200 bg-white p-3">
-        <h2 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-2 px-1">
-          Documents ({docsForSource.length})
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-3 px-1">
+          Documents <span className="text-ink-300 font-normal normal-case tracking-normal">({docsForSource.length})</span>
         </h2>
-        {loading && <div className="text-ink-400 text-sm">Loading…</div>}
+        {loading && <div className="text-[13px] text-ink-400 px-1">Loading…</div>}
         {!loading && docsForSource.length === 0 && (
           <EmptyDocs onIngest={refreshIngest} source={selectedSource} />
         )}
-        <ul className="space-y-2">
+        <ul className="space-y-1.5">
           {docsForSource.map((d) => {
             const active = (selectedDoc?.id ?? null) === d.id;
             const isDeleting = !!deletingIds[d.id];
@@ -551,8 +560,10 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               <li key={d.id}>
                 <div
                   className={
-                    "group relative rounded-lg border p-3 transition " +
-                    (active ? "border-ink-900 bg-ink-50" : "border-ink-200 hover:border-ink-400")
+                    "group relative rounded-lg border p-3 transition-colors duration-150 " +
+                    (active
+                      ? "border-ink-900 bg-ink-50"
+                      : "border-ink-200 hover:border-ink-300 hover:bg-ink-50/60")
                   }
                 >
                   <button
@@ -561,10 +572,10 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
                   >
                     <div className="flex items-center gap-2 mb-1">
                       <SourceBadge source={d.source} />
-                      {d.embedding && <span title="embedded" className="text-emerald-600 text-xs">✓ embedded</span>}
+                      {d.embedding && <span title="embedded" className="text-[11px] text-emerald-600 font-medium">✓ embedded</span>}
                     </div>
-                    <div className="font-medium truncate">{d.title ?? d.snippet?.slice(0, 60) ?? "(untitled)"}</div>
-                    <div className="text-xs text-ink-400 truncate">
+                    <div className="text-[13px] font-medium text-ink-900 truncate">{d.title ?? d.snippet?.slice(0, 60) ?? "(untitled)"}</div>
+                    <div className="text-[11px] text-ink-400 truncate mt-0.5">
                       {d.author ? `${d.author} · ` : ""}
                       {new Date(d.source_updated_at ?? d.ts).toLocaleString()}
                     </div>
@@ -590,11 +601,11 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
 
       {/* Column 3 — Chunks / Detail */}
       <aside className="col-span-4 rounded-xl border border-ink-200 bg-white p-3">
-        <h2 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-2 px-1">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-3 px-1">
           Chunks · Detail
         </h2>
         {!selectedDoc && (
-          <div className="text-ink-400 text-sm p-2">Select a document.</div>
+          <div className="text-[13px] text-ink-400 px-1 py-2">Select a document.</div>
         )}
         {selectedDoc && (
           <div className="space-y-3">
@@ -606,25 +617,25 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               previewChunks={chunkPreview.length}
             />
             <div>
-              <div className="text-xs text-ink-400">Title</div>
-              <div className="font-medium">{selectedDoc.title ?? "(untitled)"}</div>
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-0.5">Title</div>
+              <div className="text-[13px] font-medium text-ink-900">{selectedDoc.title ?? "(untitled)"}</div>
             </div>
             {selectedDoc.ref_url && (
               <div>
-                <div className="text-xs text-ink-400">Source URL</div>
+                <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-0.5">Source URL</div>
                 <a href={selectedDoc.ref_url} target="_blank" rel="noreferrer"
-                   className="text-sm text-blue-600 hover:underline break-all">
+                   className="text-[13px] text-blue-600 hover:underline break-all transition-colors duration-150">
                   {selectedDoc.ref_url}
                 </a>
               </div>
             )}
             <div>
-              <div className="text-xs text-ink-400 mb-1">Snippet</div>
-              <p className="text-sm text-ink-600">{selectedDoc.snippet}</p>
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-1">Snippet</div>
+              <p className="text-[13px] text-ink-600 leading-relaxed">{selectedDoc.snippet}</p>
             </div>
             {chunkPreview.length > 0 && (
               <div>
-                <div className="mb-1 text-xs text-ink-400">Chunk Stream</div>
+                <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400">Chunk Stream</div>
                 <div className="space-y-2">
                   {chunkPreview.map((chunk, idx) => (
                     <div
@@ -652,16 +663,23 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               </div>
             )}
             <div>
-              <div className="text-xs text-ink-400 mb-1">Full text</div>
-              <pre className="text-xs whitespace-pre-wrap bg-ink-100 rounded p-2 max-h-72 overflow-auto">
+              <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-1">Full text</div>
+              <pre className="text-[11px] whitespace-pre-wrap bg-ink-50 border border-ink-200 rounded-lg p-2.5 max-h-72 overflow-auto text-ink-600 leading-relaxed">
                 {selectedDoc.full_text ?? "(not stored)"}
               </pre>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs text-ink-400">
-              <div><span className="block">external_id</span><code className="text-ink-600">{selectedDoc.external_id ?? "—"}</code></div>
-              <div><span className="block">embedding</span><code className="text-ink-600">{selectedDoc.embedding ? `vec(${selectedDoc.embedding.length})` : "—"}</code></div>
-              <div><span className="block">source_created_at</span><code className="text-ink-600">{selectedDoc.source_created_at ?? "—"}</code></div>
-              <div><span className="block">source_updated_at</span><code className="text-ink-600">{selectedDoc.source_updated_at ?? "—"}</code></div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { label: "external_id", value: selectedDoc.external_id ?? "—" },
+                { label: "embedding", value: selectedDoc.embedding ? `vec(${selectedDoc.embedding.length})` : "—" },
+                { label: "source_created_at", value: selectedDoc.source_created_at ?? "—" },
+                { label: "source_updated_at", value: selectedDoc.source_updated_at ?? "—" },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-0.5">{label}</div>
+                  <code className="text-[11px] text-ink-600">{value}</code>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -747,12 +765,12 @@ function getFastApiOrigin(): string {
 
 function StatusPill({ status, dark }: { status: ConnStatus; dark: boolean }) {
   const cfg = {
-    connected:     { label: "✓",   cls: "bg-emerald-100 text-emerald-700" },
+    connected:     { label: "✓",   cls: "bg-emerald-100 text-emerald-700 font-semibold" },
     not_connected: { label: "—",   cls: "bg-ink-100 text-ink-400" },
-    beta:          { label: "β",   cls: "bg-amber-100 text-amber-700" },
+    beta:          { label: "β",   cls: "bg-amber-100 text-amber-700 font-medium" },
   }[status];
   return (
-    <span className={"text-xs px-2 py-0.5 rounded-full " + (dark ? "bg-white/10 text-white" : cfg.cls)}>
+    <span className={"text-[11px] px-1.5 py-0.5 rounded-md " + (dark ? "bg-white/10 text-white/70" : cfg.cls)}>
       {cfg.label}
     </span>
   );
@@ -761,7 +779,7 @@ function StatusPill({ status, dark }: { status: ConnStatus; dark: boolean }) {
 function SourceBadge({ source }: { source: ConnectorId }) {
   const c = CONNECTORS.find((x) => x.id === source);
   return (
-    <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-ink-100 text-ink-400 font-semibold">
+    <span className="text-[10px] uppercase tracking-[0.08em] px-1.5 py-0.5 rounded-md bg-ink-100 text-ink-500 font-semibold">
       {c?.emoji} {c?.label}
     </span>
   );
@@ -769,15 +787,15 @@ function SourceBadge({ source }: { source: ConnectorId }) {
 
 function EmptyDocs({ onIngest, source }: { onIngest: () => void; source: ConnectorId }) {
   return (
-    <div className="rounded-lg border border-dashed border-ink-200 p-6 text-center text-ink-400">
-      <div className="mb-2">No {source} documents indexed yet.</div>
+    <div className="rounded-xl border border-dashed border-ink-200 p-6 text-center text-ink-400">
+      <div className="text-[13px] mb-3">No {source} documents indexed yet.</div>
       <button
         onClick={onIngest}
-        className="text-sm rounded-md bg-ink-900 text-white px-3 py-1.5 hover:opacity-90"
+        className="text-[13px] rounded-lg bg-ink-900 text-white px-3 py-1.5 hover:opacity-90 transition-opacity duration-150"
       >
         Pull from Hyperspell
       </button>
-      <div className="text-xs mt-2">
+      <div className="text-[11px] text-ink-400 mt-2">
         Calls <code>POST /ingest/hyperspell</code> on your FastAPI.
       </div>
     </div>

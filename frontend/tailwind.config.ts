@@ -9,12 +9,20 @@ export default {
     extend: {
       colors: {
         ink: {
-          50: "#f6f7f9",
-          100: "#eceef2",
-          200: "#d3d8e0",
-          400: "#7e8597",
-          600: "#3f4757",
-          900: "#0e1220",
+          50:  "#f7f7f8",
+          100: "#f0f0f1",
+          200: "#e5e5e7",
+          300: "#d6d6da",
+          400: "#8b8b93",
+          600: "#5f6067",
+          900: "#1f2024",
+        },
+        panel: "#ffffff",
+        copper: "#8a6a4a",
+        cyan: "#5f6067",
+        accent: {
+          DEFAULT: "#1f2024",
+          hover:   "#3a3b40",
         },
       },
     },
