@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { FASTAPI_URL, authHeaders, supabase } from "@/lib/supabase";
 
+type BulletItem = string | Record<string, unknown>;
+
 type KnowledgeDocument = {
   id: string;
   project_id: string;
@@ -10,10 +12,13 @@ type KnowledgeDocument = {
   week_end: string;
   status: "generating" | "ready" | "error";
   summary: string | null;
-  themes: string[] | null;
-  decisions: string[] | null;
-  blockers: string[] | null;
-  open_questions: string[] | null;
+  // These are typed as `string[]` in the synthesizer's tool schema, but the
+  // demo seed uses richer objects (e.g. {decision, made_at, owner, refs}).
+  // Render defensively — see `bulletText` below.
+  themes: BulletItem[] | null;
+  decisions: BulletItem[] | null;
+  blockers: BulletItem[] | null;
+  open_questions: BulletItem[] | null;
   generated_at: string;
 };
 
@@ -147,9 +152,13 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
         { event: "*", schema: "public", table: "generation_runs", filter: `project_id=eq.${projectId}` },
         (p) => {
           // Realtime can't filter by `kind`; do it client-side so ingest runs
-          // never end up in the plan-generation progress card.
+          // never end up in the plan-generation progress card. Strict check:
+          // only accept rows that explicitly carry kind='plan'. Pre-migration
+          // rows may not have the column at all — those load via the initial
+          // query (which selects with .eq('kind','plan')), so dropping them
+          // from realtime is correct.
           const row = (p.new ?? p.old) as { kind?: string } | undefined;
-          if (row && row.kind && row.kind !== "plan") return;
+          if (row?.kind !== "plan") return;
           setRuns((prev) => mergeRow(prev, p));
         },
       )
@@ -528,7 +537,7 @@ function CategorySection({
   );
 }
 
-function BulletBlock({ title, items }: { title: string; items: string[] | null }) {
+function BulletBlock({ title, items }: { title: string; items: BulletItem[] | null }) {
   const list = items ?? [];
   return (
     <div>
@@ -540,11 +549,60 @@ function BulletBlock({ title, items }: { title: string; items: string[] | null }
       ) : (
         <ul className="text-[13px] text-ink-900 list-disc pl-4 space-y-0.5">
           {list.map((x, i) => (
-            <li key={i}>{x}</li>
+            <li key={i}>
+              <span>{bulletText(x)}</span>
+              <BulletMeta item={x} />
+            </li>
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+// Synthesizer (Claude) returns string[] for these arrays per its tool schema,
+// but the demo seed (and any older runs) uses object shapes like
+// {decision, owner, made_at}, {blocker, severity, owner}, {summary}, {label}.
+// Pull whichever string field is present, fall back to a JSON-stringified body
+// so a malformed payload never crashes the page.
+function bulletText(x: BulletItem): string {
+  if (typeof x === "string") return x;
+  if (!x || typeof x !== "object") return String(x ?? "");
+  const o = x as Record<string, unknown>;
+  for (const k of ["decision", "blocker", "question", "text", "summary", "label", "title"]) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  try {
+    return JSON.stringify(x);
+  } catch {
+    return String(x);
+  }
+}
+
+// Tiny inline badges for known richer shapes. Doesn't render anything for
+// pure string entries.
+function BulletMeta({ item }: { item: BulletItem }) {
+  if (typeof item !== "object" || item === null) return null;
+  const o = item as Record<string, unknown>;
+  const sev = typeof o.severity === "string" ? o.severity : null;
+  const owner = typeof o.owner === "string" ? o.owner : null;
+  if (!sev && !owner) return null;
+  const sevTone =
+    sev === "high"
+      ? "bg-rose-100 text-rose-700"
+      : sev === "medium"
+        ? "bg-amber-100 text-amber-800"
+        : "bg-ink-100 text-ink-600";
+  return (
+    <span className="ml-1.5 inline-flex items-center gap-1 align-middle">
+      {sev && (
+        <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0 rounded ${sevTone}`}>
+          {sev}
+        </span>
+      )}
+      {owner && <span className="text-[10px] text-ink-400">· {owner}</span>}
+    </span>
   );
 }
 

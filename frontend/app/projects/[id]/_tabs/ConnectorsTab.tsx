@@ -173,18 +173,18 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     () => ingestRuns.find((r) => r.status === "ready") ?? null,
     [ingestRuns],
   );
-  // Drive the gradient bar's ratio off realtime progress events. Falls back to
-  // the last completed run so the bar stays informative between syncs.
+  // Settled embed coverage = embedded docs / total docs in the current source.
+  // We compute from the rows themselves (rather than from generation_runs
+  // telemetry) so the bar stays accurate when ingest emits no
+  // chunks_selected_ratio — e.g. the "Nothing to embed" branch when Hyperspell
+  // returns 0 docs, or when rows were seeded straight into project_context.
   const liveChunkRatio = useMemo<number | null>(() => {
-    const events =
-      activeIngestRun?.progress ?? lastReadyIngestRun?.progress ?? null;
-    if (!events) return null;
-    for (let i = events.length - 1; i >= 0; i--) {
-      const r = events[i]?.extra?.["chunks_selected_ratio"];
-      if (typeof r === "number") return r;
-    }
-    return null;
-  }, [activeIngestRun, lastReadyIngestRun]);
+    if (docsForSource.length === 0) return null;
+    // Truthy match (mirrors the per-row "✓ embedded" badge below) so the count
+    // stays correct regardless of whether pgvector serializes as array or string.
+    const embedded = docsForSource.filter((d) => Boolean(d.embedding)).length;
+    return embedded / docsForSource.length;
+  }, [docsForSource]);
 
   // While a run is active, push the latest phase percent into the bar so it
   // animates 0→100 instead of waiting for embed coverage at the end.
@@ -877,7 +877,7 @@ function ChunkingBar({
               <span className="ml-1 tabular-nums">{widthPct}%</span>
             </>
           ) : chunkRatio === null ? (
-            <span className="text-indigo-700/60">Sync to compute embed coverage.</span>
+            <span className="text-indigo-700/60">No documents in this source yet.</span>
           ) : (
             <>Embed coverage {widthPct}%</>
           )}
@@ -891,19 +891,22 @@ function mergeIngestRow(
   prev: IngestRun[],
   payload: { eventType: string; new?: unknown; old?: unknown },
 ): IngestRun[] {
+  const isObj = (v: unknown): v is IngestRun =>
+    !!v && typeof v === "object" && "id" in (v as Record<string, unknown>);
   if (payload.eventType === "INSERT") {
-    const row = payload.new as IngestRun;
-    if (!row || prev.some((p) => p.id === row.id)) return prev;
+    if (!isObj(payload.new)) return prev;
+    const row = payload.new;
+    if (prev.some((p) => p.id === row.id)) return prev;
     return [row, ...prev];
   }
   if (payload.eventType === "UPDATE") {
-    const row = payload.new as IngestRun;
-    if (!row) return prev;
+    if (!isObj(payload.new)) return prev;
+    const row = payload.new;
     return prev.map((p) => (p.id === row.id ? row : p));
   }
   if (payload.eventType === "DELETE") {
-    const row = payload.old as IngestRun;
-    if (!row) return prev;
+    if (!isObj(payload.old)) return prev;
+    const row = payload.old;
     return prev.filter((p) => p.id !== row.id);
   }
   return prev;
