@@ -25,7 +25,7 @@ type PlanItemRef = {
 };
 
 const ACTION_META: Record<ActionType, { label: string; emoji: string; tone: string }> = {
-  linear_ticket: { label: "Linear ticket", emoji: "📋", tone: "border-violet-200" },
+  linear_ticket: { label: "Linear ticket", emoji: "□", tone: "border-ink-200" },
   github_pr: { label: "GitHub PR", emoji: "🐙", tone: "border-slate-200" },
   devin_handoff: { label: "Devin handoff", emoji: "🤖", tone: "border-cyan-200" },
 };
@@ -172,18 +172,18 @@ export default function ActionsTab({ projectId }: { projectId: string }) {
 
       <div className="rounded-xl border border-ink-200 bg-white p-5 flex items-center justify-between gap-4">
         <div>
-          <div className="text-[11px] uppercase tracking-wider text-ink-400 font-semibold">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">
             Generated from Knowledge Doc
           </div>
-          <h2 className="text-lg font-semibold text-ink-900 mt-0.5">
+          <h2 className="text-[17px] font-semibold tracking-[-0.2px] text-ink-900 mt-0.5">
             Action queue{" "}
-            <span className="text-ink-400 font-normal text-sm">
+            <span className="text-ink-400 font-normal text-[13px]">
               · {actions.length} draft{actions.length === 1 ? "" : "s"}
               {counts.executed > 0 && ` · ${counts.executed} executed`}
               {counts.failed > 0 && ` · ${counts.failed} failed`}
             </span>
           </h2>
-          <p className="text-xs text-ink-400 mt-1">
+          <p className="text-[12px] text-ink-500 mt-1 leading-relaxed">
             Each card is a <code>generated_actions</code> row. Execute fans out to Linear (issues),
             GitHub (PRs / comments), or Devin (autonomous code tasks).
           </p>
@@ -284,20 +284,20 @@ function TargetTile({
     <button
       onClick={onClick}
       className={
-        "rounded-xl border p-4 text-left transition " +
+        "rounded-xl border p-4 text-left transition-colors duration-150 " +
         (active
           ? "border-ink-900 bg-ink-50"
-          : "border-ink-200 bg-white hover:border-ink-400")
+          : "border-ink-200 bg-white hover:border-ink-300 hover:bg-ink-50/60")
       }
     >
-      <div className="flex items-center justify-between gap-2 mb-1">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-2">
-          <span className="text-base">{icon}</span>
-          <span className="font-medium text-ink-900">{label}</span>
+          <span className="text-[15px]">{icon}</span>
+          <span className="text-[13px] font-semibold text-ink-900">{label}</span>
         </div>
-        <span className="text-xs text-ink-400">{count}</span>
+        <span className="text-[11px] text-ink-400 tabular-nums">{count}</span>
       </div>
-      <div className="text-xs text-ink-400">{detail}</div>
+      <div className="text-[11px] text-ink-500">{detail}</div>
     </button>
   );
 }
@@ -317,12 +317,12 @@ function PlanItemGroup({
 }) {
   return (
     <section className="rounded-xl border border-ink-200 bg-white p-4 space-y-3">
-      <header className="flex items-center justify-between gap-3 border-b border-ink-100 pb-2">
+      <header className="flex items-center justify-between gap-3 border-b border-ink-100 pb-2.5">
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wider text-ink-400 font-semibold">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-0.5">
             Plan item
           </div>
-          <div className="font-medium text-ink-900 truncate flex items-center gap-1.5">
+          <div className="text-[13px] font-medium text-ink-900 truncate flex items-center gap-1.5">
             {planItem ? (
               <>
                 <span>{CATEGORY_EMOJI[planItem.category]}</span>
@@ -333,7 +333,7 @@ function PlanItemGroup({
             )}
           </div>
         </div>
-        <span className="text-xs text-ink-400 shrink-0">
+        <span className="text-[11px] text-ink-400 shrink-0">
           {actions.length} action{actions.length === 1 ? "" : "s"}
         </span>
       </header>
@@ -384,14 +384,14 @@ function ActionCard({
   return (
     <article className={`rounded-lg border ${meta.tone} bg-ink-50/40 p-3 space-y-2 flex flex-col`}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-wider text-ink-400 font-semibold flex items-center gap-1">
-          <span className="text-base">{meta.emoji}</span>
+        <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-500 flex items-center gap-1.5">
+          <span className="text-[13px]">{meta.emoji}</span>
           <span>{meta.label}</span>
         </div>
         <ActionStatusPill status={action.status} />
       </div>
-      <div className="text-sm font-medium text-ink-900 line-clamp-2">{headline}</div>
-      {detail && <p className="text-xs text-ink-600 line-clamp-3 leading-snug">{detail}</p>}
+      <div className="text-[13px] font-medium text-ink-900 line-clamp-2">{headline}</div>
+      {detail && <p className="text-[12px] text-ink-600 line-clamp-3 leading-snug">{detail}</p>}
       <Payload payload={payload} type={action.action_type} />
 
       <div className="flex-1" />
@@ -411,7 +411,7 @@ function ActionCard({
           onClick={onExecute}
           disabled={isExecuting}
           className={
-            "text-xs rounded-md px-2.5 py-1.5 transition " +
+            "text-[12px] font-medium rounded-md px-2.5 py-1.5 transition-opacity duration-150 " +
             (isFailed
               ? "bg-rose-600 text-white hover:opacity-90"
               : "bg-ink-900 text-white hover:opacity-90") +
@@ -514,18 +514,18 @@ function FilterPicker({
     { v: "devin_handoff", label: "🤖" },
   ];
   return (
-    <div className="flex items-center gap-1 rounded-lg border border-ink-200 p-0.5 text-xs">
+    <div className="flex items-center gap-0.5 rounded-lg border border-ink-200 bg-ink-50 p-0.5 text-[12px]">
       {opts.map((o) => (
         <button
           key={o.v}
           onClick={() => onChange(o.v)}
           className={
-            "px-2 py-1 rounded transition " +
-            (value === o.v ? "bg-ink-900 text-white" : "text-ink-600 hover:bg-ink-100")
+            "px-2.5 py-1 rounded-md transition-colors duration-150 " +
+            (value === o.v ? "bg-ink-900 text-white" : "text-ink-600 hover:bg-ink-100 hover:text-ink-900")
           }
           aria-pressed={value === o.v}
         >
-          <span>{o.label}</span> <span className="opacity-70">{counts[o.v]}</span>
+          <span>{o.label}</span> <span className="opacity-60 tabular-nums">{counts[o.v]}</span>
         </button>
       ))}
     </div>

@@ -223,15 +223,15 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
       {/* Generate header */}
       <div className="rounded-xl border border-ink-200 bg-white p-5 flex items-center justify-between gap-4">
         <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-wider text-ink-400 font-semibold">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">
             Synthesis run
           </div>
-          <h2 className="text-lg font-semibold text-ink-900 mt-0.5">
+          <h2 className="text-[17px] font-semibold tracking-[-0.2px] text-ink-900 mt-0.5">
             {selectedDoc
               ? `Week of ${formatYmdLocal(selectedDoc.week_start)}`
               : `Week of ${new Date().toLocaleDateString()}`}
           </h2>
-          <p className="text-xs text-ink-400 mt-1">
+          <p className="text-[12px] text-ink-500 mt-1 leading-relaxed">
             Pulls every <code>project_context</code> + <code>meeting_notes</code> row, runs synthesis +
             categorization, writes <code>knowledge_documents</code> and <code>plan_items</code>.
           </p>
@@ -239,7 +239,7 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
         <button
           onClick={generate}
           disabled={busy || !!activeRun}
-          className="rounded-lg bg-ink-900 text-white px-4 py-2 text-sm hover:opacity-90 disabled:opacity-50 shrink-0"
+          className="rounded-lg bg-ink-900 text-white px-4 py-2 text-[13px] font-medium hover:opacity-90 transition-opacity duration-150 disabled:opacity-50 shrink-0"
         >
           {busy || activeRun ? "Generating…" : selectedDoc ? "✨ Regenerate" : "✨ Generate"}
         </button>
@@ -261,15 +261,15 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
       {/* Two-pane: list left, doc right */}
       <div className="grid grid-cols-12 gap-4">
         <aside className="col-span-4 lg:col-span-3 rounded-xl border border-ink-200 bg-white p-3">
-          <h3 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-2 px-1">
-            Knowledge documents · {docs.length}
+          <h3 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-3 px-1">
+            Knowledge documents <span className="text-ink-300 font-normal tracking-normal normal-case">· {docs.length}</span>
           </h3>
           {docs.length === 0 ? (
-            <div className="text-xs text-ink-400 italic px-1 py-3">
+            <div className="text-[12px] text-ink-400 italic px-1 py-3">
               None yet. Click Generate to create the first one.
             </div>
           ) : (
-            <ul className="space-y-1">
+            <ul className="space-y-0.5">
               {docs.map((d) => {
                 const active = (selectedDoc?.id ?? null) === d.id;
                 const count = itemCountByDoc[d.id] ?? 0;
@@ -278,12 +278,12 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
                     <button
                       onClick={() => setSelectedDocId(d.id)}
                       className={
-                        "w-full text-left rounded-lg px-3 py-2 transition flex flex-col gap-0.5 " +
+                        "w-full text-left rounded-lg px-3 py-2 transition-colors duration-150 flex flex-col gap-0.5 " +
                         (active ? "bg-ink-900 text-white" : "hover:bg-ink-100 text-ink-900")
                       }
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium truncate">
+                        <span className="text-[13px] font-medium truncate">
                           {formatYmdLocal(d.week_start)}
                         </span>
                         <DocStatusDot status={d.status} dark={active} />
@@ -379,7 +379,7 @@ function TraceEvent({ event }: { event: ProgressEvent }) {
   const dot = isError
     ? "bg-rose-500"
     : isReasoning
-      ? "bg-violet-500"
+      ? "bg-ink-900"
       : isEnd
         ? "bg-emerald-500"
         : "bg-ink-400";
@@ -391,7 +391,7 @@ function TraceEvent({ event }: { event: ProgressEvent }) {
         <span
           className={
             isReasoning
-              ? "text-violet-700 italic"
+              ? "text-ink-600 italic"
               : isError
                 ? "text-rose-700"
                 : "text-ink-600"
@@ -414,12 +414,12 @@ function DocCard({ doc }: { doc: KnowledgeDocument }) {
   return (
     <article className="rounded-xl border border-ink-200 bg-white p-5 space-y-4">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold uppercase text-ink-400 tracking-wide">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400">
           Synthesis cards
         </h3>
         <DocStatusPill status={doc.status} />
       </div>
-      <p className="text-sm text-ink-900 leading-relaxed">
+      <p className="text-[13px] text-ink-900 leading-relaxed">
         {doc.summary || <span className="text-ink-400 italic">(empty summary)</span>}
       </p>
       <div className="grid grid-cols-2 gap-3">
@@ -441,9 +441,9 @@ function PlanItemsPanel({
 }) {
   return (
     <div className="rounded-xl border border-ink-200 bg-white p-5">
-      <h3 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-3">
+      <h3 className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-3">
         Actionable insights{" "}
-        {items.length > 0 && <span className="text-ink-400/70">· {items.length}</span>}
+        {items.length > 0 && <span className="text-ink-300 font-normal tracking-normal normal-case">· {items.length}</span>}
       </h3>
       {items.length === 0 ? (
         <ul className="space-y-2 text-sm">
@@ -484,23 +484,23 @@ function CategorySection({
   const meta = CATEGORY_META[category];
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-ink-400 font-semibold mb-1.5 flex items-center gap-1">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-2 flex items-center gap-1.5">
         <span>{meta.emoji}</span>
         <code>{meta.label}</code>
-        <span className="text-ink-400/70 font-normal normal-case">· {items.length}</span>
+        <span className="text-ink-300 font-normal normal-case tracking-normal">· {items.length}</span>
       </div>
       <ul className="space-y-2">
         {items.map((it) => (
-          <li key={it.id} className={`rounded-lg border ${meta.tone} p-2.5 space-y-1`}>
+          <li key={it.id} className={`rounded-lg border ${meta.tone} p-3 space-y-1.5`}>
             <div className="flex items-center justify-between gap-2">
-              <div className="font-medium text-ink-900 text-sm">{it.title}</div>
+              <div className="text-[13px] font-medium text-ink-900">{it.title}</div>
               {it.confidence !== null && (
-                <span className="text-[10px] text-ink-400 shrink-0">
+                <span className="text-[10px] text-ink-400 shrink-0 tabular-nums">
                   {Math.round((it.confidence ?? 0) * 100)}%
                 </span>
               )}
             </div>
-            {it.description && <p className="text-xs text-ink-600 leading-snug">{it.description}</p>}
+            {it.description && <p className="text-[12px] text-ink-600 leading-snug">{it.description}</p>}
             {it.next_step && (
               <div className="text-[11px] text-ink-600">
                 <span className="font-semibold">Next:</span> {it.next_step}
@@ -532,13 +532,13 @@ function BulletBlock({ title, items }: { title: string; items: string[] | null }
   const list = items ?? [];
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-ink-400 font-semibold mb-1">
-        {title} {list.length > 0 && <span className="text-ink-400/70">· {list.length}</span>}
+      <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400 mb-1.5">
+        {title} {list.length > 0 && <span className="text-ink-300 font-normal tracking-normal normal-case">· {list.length}</span>}
       </div>
       {list.length === 0 ? (
-        <div className="text-xs text-ink-400 italic">none</div>
+        <div className="text-[12px] text-ink-400 italic">none</div>
       ) : (
-        <ul className="text-sm text-ink-900 list-disc pl-4 space-y-0.5">
+        <ul className="text-[13px] text-ink-900 list-disc pl-4 space-y-0.5">
           {list.map((x, i) => (
             <li key={i}>{x}</li>
           ))}
