@@ -860,19 +860,22 @@ function mergeIngestRow(
   prev: IngestRun[],
   payload: { eventType: string; new?: unknown; old?: unknown },
 ): IngestRun[] {
+  const isObj = (v: unknown): v is IngestRun =>
+    !!v && typeof v === "object" && "id" in (v as Record<string, unknown>);
   if (payload.eventType === "INSERT") {
-    const row = payload.new as IngestRun;
-    if (!row || prev.some((p) => p.id === row.id)) return prev;
+    if (!isObj(payload.new)) return prev;
+    const row = payload.new;
+    if (prev.some((p) => p.id === row.id)) return prev;
     return [row, ...prev];
   }
   if (payload.eventType === "UPDATE") {
-    const row = payload.new as IngestRun;
-    if (!row) return prev;
+    if (!isObj(payload.new)) return prev;
+    const row = payload.new;
     return prev.map((p) => (p.id === row.id ? row : p));
   }
   if (payload.eventType === "DELETE") {
-    const row = payload.old as IngestRun;
-    if (!row) return prev;
+    if (!isObj(payload.old)) return prev;
+    const row = payload.old;
     return prev.filter((p) => p.id !== row.id);
   }
   return prev;

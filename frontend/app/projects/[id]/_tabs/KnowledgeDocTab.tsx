@@ -152,9 +152,13 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
         { event: "*", schema: "public", table: "generation_runs", filter: `project_id=eq.${projectId}` },
         (p) => {
           // Realtime can't filter by `kind`; do it client-side so ingest runs
-          // never end up in the plan-generation progress card.
+          // never end up in the plan-generation progress card. Strict check:
+          // only accept rows that explicitly carry kind='plan'. Pre-migration
+          // rows may not have the column at all — those load via the initial
+          // query (which selects with .eq('kind','plan')), so dropping them
+          // from realtime is correct.
           const row = (p.new ?? p.old) as { kind?: string } | undefined;
-          if (row && row.kind && row.kind !== "plan") return;
+          if (row?.kind !== "plan") return;
           setRuns((prev) => mergeRow(prev, p));
         },
       )
