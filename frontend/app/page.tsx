@@ -38,9 +38,7 @@ function formatDate(iso: string): string {
 }
 
 const NAV = [
-  { label: "Projects",  icon: "◈", active: true },
-  { label: "Knowledge", icon: "🧠", active: false },
-  { label: "Settings",  icon: "⚙", active: false },
+  { label: "Projects", icon: "◈", active: true },
 ];
 
 export default function ProjectsPage() {

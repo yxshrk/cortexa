@@ -609,13 +609,26 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         )}
         {selectedDoc && (
           <div className="space-y-3">
-            <ChunkingBar
-              activeRun={activeIngestRun}
-              latestEvent={liveLatestEvent}
-              livePhasePercent={livePhasePercent}
-              chunkRatio={liveChunkRatio}
-              previewChunks={chunkPreview.length}
-            />
+            <section className="rounded-lg border border-ink-200 bg-ink-50 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-400">
+                  Embed coverage
+                </span>
+                <span className="text-[10px] text-ink-400">
+                  {chunkPreview.length} preview chunk{chunkPreview.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-ink-200">
+                <div
+                  className="h-full rounded-full bg-ink-900 transition-all duration-700"
+                  style={{ width: `${Math.round((liveChunkRatio ?? 0.5) * 100)}%` }}
+                />
+              </div>
+              <div className="mt-1.5 text-[11px] text-ink-500">
+                {Math.round((liveChunkRatio ?? 0.5) * 100)}% coverage
+                {liveChunkRatio === null && " (preview estimate)"}
+              </div>
+            </section>
             <div>
               <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-ink-400 mb-0.5">Title</div>
               <div className="text-[13px] font-medium text-ink-900">{selectedDoc.title ?? "(untitled)"}</div>
@@ -640,17 +653,17 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
                   {chunkPreview.map((chunk, idx) => (
                     <div
                       key={`${selectedDoc.id}-chunk-${idx}`}
-                      className="group rounded-lg border border-ink-200 bg-white/80 p-2 shadow-[0_1px_6px_rgba(99,102,241,0.08)] transition hover:-translate-y-[1px] hover:border-indigo-300 hover:shadow-[0_4px_18px_rgba(79,70,229,0.18)]"
+                      className="rounded-lg border border-ink-200 bg-white p-2 transition-colors duration-150 hover:border-ink-300 hover:bg-ink-50/60"
                     >
                       <div className="mb-1 flex items-center justify-between">
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-indigo-600">
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-500">
                           Chunk {idx + 1}
                         </span>
-                        <span className="text-[10px] text-ink-400">{chunk.chars} chars</span>
+                        <span className="text-[10px] text-ink-400 tabular-nums">{chunk.chars} chars</span>
                       </div>
                       <div className="mb-1 h-1.5 overflow-hidden rounded-full bg-ink-100">
                         <div
-                          className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400 transition-all duration-700"
+                          className="h-full rounded-full bg-ink-900 transition-all duration-700"
                           style={{ width: `${Math.max(8, Math.min(100, Math.round((chunk.chars / 420) * 100)))}%` }}
                         />
                       </div>
