@@ -1,23 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Edge, Node } from "@xyflow/react";
-import { LiveContextDiagram } from "./LiveContextDiagram";
+import { LiveContextWhiteboard } from "./LiveContextWhiteboard";
 import { fallbackDiagramPlan, type DiagramGroup, type DiagramPlan } from "@/lib/diagramPlan";
+import { diagramPlanToElements } from "@/lib/diagramPlanToElements";
 import type { ProjectContextItem } from "@/lib/realtime";
 
-const GROUP_META: Record<
-  DiagramGroup,
-  { label: string; color: string; x: number; y: number }
-> = {
-  topic: { label: "Current Topic", color: "#111827", x: 0, y: 220 },
-  frontend: { label: "Frontend", color: "#dbeafe", x: 360, y: 0 },
-  backend: { label: "Backend", color: "#dcfce7", x: 360, y: 160 },
-  data: { label: "Data", color: "#fef3c7", x: 360, y: 320 },
-  decision: { label: "Decision", color: "#f3e8ff", x: 360, y: 480 },
+const GROUP_LABEL: Record<DiagramGroup, string> = {
+  topic: "Current Topic",
+  frontend: "Frontend",
+  backend: "Backend",
+  data: "Data",
+  decision: "Decision",
 };
 
-const GROUP_ORDER: DiagramGroup[] = ["topic", "frontend", "backend", "data", "decision"];
+const SIDE_GROUPS: DiagramGroup[] = ["frontend", "backend", "data", "decision"];
 
 export function MeetingContextBoard({
   query,
@@ -74,8 +71,12 @@ export function MeetingContextBoard({
   }, [items, query]);
 
   const visiblePlan = plannedDiagram ?? lastUsefulPlanRef.current;
-  const graph = useMemo(() => (visiblePlan ? toGraph(visiblePlan) : { nodes: [], edges: [] }), [visiblePlan]);
+  const whiteboardElements = useMemo(
+    () => (visiblePlan ? diagramPlanToElements(visiblePlan) : []),
+    [visiblePlan],
+  );
   const groupedNodes = useMemo(() => groupPlanNodes(visiblePlan), [visiblePlan]);
+  const hasContent = whiteboardElements.length > 0;
 
   return (
     <section className="space-y-3">
@@ -97,11 +98,11 @@ export function MeetingContextBoard({
         </div>
       )}
 
-      {graph.nodes.length > 0 ? (
+      {hasContent ? (
         <>
-          <LiveContextDiagram nodes={graph.nodes} edges={graph.edges} />
+          <LiveContextWhiteboard elements={whiteboardElements} />
           <div className="grid gap-2 md:grid-cols-2">
-            {GROUP_ORDER.filter((group) => group !== "topic").map((group) => {
+            {SIDE_GROUPS.map((group) => {
               const nodes = groupedNodes[group];
               if (nodes.length === 0) return null;
 
@@ -109,7 +110,7 @@ export function MeetingContextBoard({
                 <section key={group} className="rounded-lg border border-ink-200 bg-white p-3">
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <h4 className="text-xs font-semibold uppercase text-ink-500">
-                      {GROUP_META[group].label}
+                      {GROUP_LABEL[group]}
                     </h4>
                     <span className="text-xs text-ink-400">{nodes.length}</span>
                   </div>
@@ -128,63 +129,11 @@ export function MeetingContextBoard({
         </>
       ) : (
         <div className="rounded-lg border border-dashed border-ink-200 p-8 text-center text-sm text-ink-400">
-          The diagram will appear when the model calls project context.
+          The whiteboard will appear when the model calls project context.
         </div>
       )}
     </section>
   );
-}
-
-function toGraph(plan: DiagramPlan): { nodes: Node[]; edges: Edge[] } {
-  const grouped = groupPlanNodes(plan);
-  const nodes: Node[] = [];
-
-  for (const group of GROUP_ORDER) {
-    const meta = GROUP_META[group];
-    const groupNodes = grouped[group];
-
-    groupNodes.forEach((node, index) => {
-      const isTopic = group === "topic";
-      nodes.push({
-        id: node.id,
-        position: {
-          x: isTopic ? meta.x : meta.x + Math.floor(index / 3) * 340,
-          y: isTopic ? meta.y : meta.y + (index % 3) * 110,
-        },
-        data: {
-          label: isTopic
-            ? `Current topic\n${node.label}\n${node.detail}`
-            : `${GROUP_META[group].label}\n${node.label}\n${node.detail}`,
-        },
-        type: "default",
-        style: {
-          background: meta.color,
-          border: isTopic ? "1px solid #111827" : "1px solid #94a3b8",
-          color: isTopic ? "#ffffff" : "#0f172a",
-          width: isTopic ? 280 : 300,
-          fontSize: isTopic ? 12 : 11,
-          fontWeight: isTopic ? 600 : 500,
-          lineHeight: 1.35,
-          padding: 12,
-          whiteSpace: "pre-wrap",
-        },
-      });
-    });
-  }
-
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const edges = plan.edges
-    .filter((edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to))
-    .map((edge, index): Edge => ({
-      id: `edge-${edge.from}-${edge.to}-${index}`,
-      source: edge.from,
-      target: edge.to,
-      label: edge.label,
-      animated: edge.from === "topic",
-      style: { strokeWidth: edge.from === "topic" ? 2 : 1 },
-    }));
-
-  return { nodes, edges };
 }
 
 function groupPlanNodes(plan: DiagramPlan | null) {
@@ -209,7 +158,15 @@ function normalizePlan(plan: DiagramPlan, topic: string, items: ProjectContextIt
   const hasTopic = nodes.some((node) => node.id === "topic" && node.group === "topic");
   const normalizedNodes = hasTopic
     ? nodes
-    : [{ id: "topic", label: plan.topic || topic, detail: "Current discussion topic.", group: "topic" as const }, ...nodes];
+    : [
+        {
+          id: "topic",
+          label: plan.topic || topic,
+          detail: "Current discussion topic.",
+          group: "topic" as const,
+        },
+        ...nodes,
+      ];
 
   return {
     topic: plan.topic || topic,

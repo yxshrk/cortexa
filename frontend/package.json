@@ -9,12 +9,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
     "@supabase/supabase-js": "^2.45.0",
-    "@xyflow/react": "^12.3.5",
     "next": "^15.0.0",
+    "openai": "^4.70.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "openai": "^4.70.0"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
