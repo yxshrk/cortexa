@@ -173,18 +173,16 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     () => ingestRuns.find((r) => r.status === "ready") ?? null,
     [ingestRuns],
   );
-  // Drive the gradient bar's ratio off realtime progress events. Falls back to
-  // the last completed run so the bar stays informative between syncs.
+  // Settled embed coverage = embedded docs / total docs in the current source.
+  // We compute from the rows themselves (rather than from generation_runs
+  // telemetry) so the bar stays accurate when ingest emits no
+  // chunks_selected_ratio — e.g. the "Nothing to embed" branch when Hyperspell
+  // returns 0 docs, or when rows were seeded straight into project_context.
   const liveChunkRatio = useMemo<number | null>(() => {
-    const events =
-      activeIngestRun?.progress ?? lastReadyIngestRun?.progress ?? null;
-    if (!events) return null;
-    for (let i = events.length - 1; i >= 0; i--) {
-      const r = events[i]?.extra?.["chunks_selected_ratio"];
-      if (typeof r === "number") return r;
-    }
-    return null;
-  }, [activeIngestRun, lastReadyIngestRun]);
+    if (docsForSource.length === 0) return null;
+    const embedded = docsForSource.filter((d) => Array.isArray(d.embedding)).length;
+    return embedded / docsForSource.length;
+  }, [docsForSource]);
 
   // While a run is active, push the latest phase percent into the bar so it
   // animates 0→100 instead of waiting for embed coverage at the end.
@@ -846,7 +844,7 @@ function ChunkingBar({
               <span className="ml-1 tabular-nums">{widthPct}%</span>
             </>
           ) : chunkRatio === null ? (
-            <span className="text-indigo-700/60">Sync to compute embed coverage.</span>
+            <span className="text-indigo-700/60">No documents in this source yet.</span>
           ) : (
             <>Embed coverage {widthPct}%</>
           )}
