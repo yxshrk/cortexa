@@ -1,13 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { activeFileLabel, BriefingPanel, themeLabel, type Briefing } from "./BriefingPanel";
 import { MeetingContextBoard } from "./MeetingContextBoard";
 import { captureMeetingAudio, MeetingAudioError } from "@/lib/meetingAudio";
 import { connectRealtime, type ProjectContextItem, type RealtimeConnection } from "@/lib/realtime";
-import { queryProjectContext } from "@/lib/contextQuery";
 import { supabase } from "@/lib/supabase";
 import type { VoiceNote } from "@/lib/voiceNoteSchema";
+import type { WhiteboardPlan } from "@/lib/whiteboardElements";
+import {
+  connectWhiteboardSocket,
+  type PlannerStatusState,
+  type WhiteboardSocket,
+} from "@/lib/whiteboardSocket";
 
 type VoiceAgentStatus = "idle" | "loading" | "ready" | "listening" | "error";
 
@@ -22,14 +27,26 @@ export function VoiceAgent({
 }) {
   const [status, setStatus] = useState<VoiceAgentStatus>("idle");
   const [briefing, setBriefing] = useState<Briefing | null>(null);
-  const [contextQuery, setContextQuery] = useState<string | null>(null);
-  const [contextItems, setContextItems] = useState<ProjectContextItem[]>([]);
   const [manualQuery, setManualQuery] = useState("Safari login redirect");
   const [connection, setConnection] = useState<RealtimeConnection | null>(null);
   const [lastNoteCount, setLastNoteCount] = useState(0);
   const [partialTranscript, setPartialTranscript] = useState("");
   const [transcriptChunks, setTranscriptChunks] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const [plan, setPlan] = useState<WhiteboardPlan | null>(null);
+  const [contextItems, setContextItems] = useState<ProjectContextItem[]>([]);
+  const [plannerStatus, setPlannerStatus] = useState<PlannerStatusState>("idle");
+  const [plannerMessage, setPlannerMessage] = useState<string | null>(null);
+  const [topic, setTopic] = useState<string | null>(null);
+  const whiteboardSocketRef = useRef<WhiteboardSocket | null>(null);
+
+  useEffect(() => {
+    return () => {
+      whiteboardSocketRef.current?.close();
+      whiteboardSocketRef.current = null;
+    };
+  }, []);
 
   async function loadBriefing() {
     setStatus("loading");
@@ -63,6 +80,35 @@ export function VoiceAgent({
       const activeBriefing = briefing ?? (await fetchBriefing(fastApiUrl));
       setBriefing(activeBriefing);
 
+      const wb = await connectWhiteboardSocket({
+        fastApiUrl,
+        meetingId,
+        projectId,
+        onEvent: (event) => {
+          if (event.type === "whiteboard.update") {
+            setPlan(event.plan);
+            setContextItems(event.context ?? []);
+            if (event.plan.topic) setTopic(event.plan.topic);
+            setPlannerStatus("ready");
+            setPlannerMessage(null);
+          } else if (event.type === "planner.status") {
+            setPlannerStatus(event.state);
+            setPlannerMessage(event.message ?? null);
+          } else if (event.type === "whiteboard.reset") {
+            setPlan(null);
+            setContextItems([]);
+            setTopic(null);
+          } else if (event.type === "error") {
+            setPlannerStatus("error");
+            setPlannerMessage(event.message);
+          }
+        },
+        onError: (err) => {
+          setError(err.message);
+        },
+      });
+      whiteboardSocketRef.current = wb;
+
       const token = await getRealtimeToken(fastApiUrl);
       if (!token.value) throw new Error("Token response missing value.");
 
@@ -86,27 +132,20 @@ export function VoiceAgent({
         stream,
         token: token.value,
         briefingPrompt: buildBriefingPrompt(activeBriefing),
-        projectId,
-        fastApiUrl,
-        queryContext: (query) =>
-          queryProjectContext({
-            fastApiUrl,
-            projectId,
-            query,
-            k: 6,
-          }),
         onTranscript: (event) => {
           if (event.type === "delta") {
             setPartialTranscript((current) => `${current}${event.text}`.slice(-900));
           } else {
             setPartialTranscript("");
-            setTranscriptChunks((chunks) => [event.text, ...chunks].slice(0, 8));
-            void persistTranscriptChunk(event.text, activeBriefing);
+            const finalText = event.text.trim();
+            if (!finalText) return;
+            setTranscriptChunks((chunks) => [finalText, ...chunks].slice(0, 8));
+            whiteboardSocketRef.current?.send({
+              type: "transcript.completed",
+              text: finalText,
+            });
+            void persistTranscriptChunk(finalText, activeBriefing);
           }
-        },
-        onContextItems: (query, items) => {
-          setContextQuery(query);
-          setContextItems(items);
         },
         onError: (err) => {
           setError(err.message);
@@ -116,6 +155,8 @@ export function VoiceAgent({
       setConnection(realtime);
       setStatus("listening");
     } catch (err) {
+      whiteboardSocketRef.current?.close();
+      whiteboardSocketRef.current = null;
       setStatus("error");
       setError(err instanceof Error ? err.message : "Failed to start listener.");
     }
@@ -133,26 +174,54 @@ export function VoiceAgent({
   function stopListener() {
     connection?.close();
     setConnection(null);
+    whiteboardSocketRef.current?.close();
+    whiteboardSocketRef.current = null;
     setStatus(briefing ? "ready" : "idle");
   }
 
-  async function runManualContextQuery() {
-    const query = manualQuery.trim();
-    const fastApiUrl = getFastApiUrl();
-    if (!query || !fastApiUrl) return;
+  function sendManualQuery() {
+    const text = manualQuery.trim();
+    if (!text) return;
+    setTopic(text);
 
-    try {
-      const items = await queryProjectContext({
-        fastApiUrl,
-        projectId,
-        query,
-        k: 6,
-      });
-      setContextQuery(query);
-      setContextItems(items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to query context.");
+    const wb = whiteboardSocketRef.current;
+    if (wb) {
+      wb.send({ type: "transcript.completed", text });
+      return;
     }
+
+    // Listener isn't running — open a one-shot connection so the user can
+    // still drive the whiteboard from the manual input.
+    void (async () => {
+      try {
+        const fastApiUrl = getFastApiUrl();
+        const oneShot = await connectWhiteboardSocket({
+          fastApiUrl,
+          meetingId,
+          projectId,
+          onEvent: (event) => {
+            if (event.type === "whiteboard.update") {
+              setPlan(event.plan);
+              setContextItems(event.context ?? []);
+              if (event.plan.topic) setTopic(event.plan.topic);
+              setPlannerStatus("ready");
+              setPlannerMessage(null);
+            } else if (event.type === "planner.status") {
+              setPlannerStatus(event.state);
+              setPlannerMessage(event.message ?? null);
+            } else if (event.type === "error") {
+              setPlannerStatus("error");
+              setPlannerMessage(event.message);
+            }
+          },
+          onError: (err) => setError(err.message),
+        });
+        whiteboardSocketRef.current = oneShot;
+        oneShot.send({ type: "transcript.completed", text });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to open whiteboard socket.");
+      }
+    })();
   }
 
   async function persistTranscriptChunk(text: string, activeBriefing: Briefing) {
@@ -215,6 +284,12 @@ export function VoiceAgent({
           </p>
           <p className="mt-1 text-xs font-medium uppercase tracking-wide text-ink-400">
             Status: {status}
+            {plannerStatus !== "idle" && plannerStatus !== "ready" && (
+              <span className="ml-2 normal-case text-ink-500">
+                · planner: {plannerStatus}
+                {plannerMessage ? ` (${plannerMessage})` : ""}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -241,7 +316,7 @@ export function VoiceAgent({
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-[minmax(260px,320px)_1fr]">
         <BriefingPanel briefing={briefing} />
         <div className="space-y-3">
           <div className="flex gap-2">
@@ -249,18 +324,33 @@ export function VoiceAgent({
               value={manualQuery}
               onChange={(event) => setManualQuery(event.target.value)}
               className="min-w-0 flex-1 rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-ink-500"
-              placeholder="Search project context"
+              placeholder="Send a topic to the whiteboard"
             />
             <button
-              onClick={runManualContextQuery}
+              onClick={sendManualQuery}
               className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 hover:border-ink-400"
             >
-              Query
+              Send
             </button>
           </div>
-          <MeetingContextBoard query={contextQuery} items={contextItems} />
+          <MeetingContextBoard
+            plan={plan}
+            topic={topic}
+            planning={plannerStatus === "planning"}
+            plannerMessage={plannerStatus === "error" ? plannerMessage : null}
+            contextItems={contextItems}
+          />
         </div>
       </div>
+
+      {!briefing && status !== "loading" && status !== "listening" && (
+        <button
+          onClick={loadBriefing}
+          className="rounded-lg border border-ink-200 px-3 py-2 text-sm font-medium text-ink-700 hover:border-ink-400"
+        >
+          Load Briefing
+        </button>
+      )}
 
       {lastNoteCount > 0 && (
         <div className="rounded-lg border border-ink-200 bg-ink-50 p-3 text-xs text-ink-500">
@@ -306,11 +396,10 @@ export function VoiceAgent({
 function buildBriefingPrompt(briefing: Briefing) {
   return [
     "You are listening to an engineering meeting for Project Brain.",
-    "Call search_project_context when project context would help participants understand the discussion.",
+    "Transcribe what is said as accurately as possible. Do not interject or respond.",
     `Project summary: ${briefing.project_summary ?? "Unknown project"}`,
     `Themes: ${(briefing.themes ?? []).map(themeLabel).join(", ")}`,
     `Active files: ${(briefing.active_files ?? []).map(activeFileLabel).filter(Boolean).join(", ")}`,
-    "Prefer concise search queries of 3-8 words.",
   ].join("\n");
 }
 

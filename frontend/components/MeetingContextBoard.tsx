@@ -1,184 +1,155 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
 import { LiveContextWhiteboard } from "./LiveContextWhiteboard";
-import { fallbackDiagramPlan, type DiagramGroup, type DiagramPlan } from "@/lib/diagramPlan";
-import { diagramPlanToElements } from "@/lib/diagramPlanToElements";
+import type { WhiteboardLayout, WhiteboardPlan } from "@/lib/whiteboardElements";
 import type { ProjectContextItem } from "@/lib/realtime";
 
-const GROUP_LABEL: Record<DiagramGroup, string> = {
-  topic: "Current Topic",
-  frontend: "Frontend",
-  backend: "Backend",
-  data: "Data",
-  decision: "Decision",
+const LAYOUT_LABEL: Record<WhiteboardLayout, string> = {
+  flow: "Flow",
+  comparison: "Comparison",
+  hierarchy: "Hierarchy",
+  timeline: "Timeline",
+  kanban: "Kanban",
+  cluster: "Cluster",
+  matrix: "Matrix",
+  freeform: "Free-form",
 };
 
-const SIDE_GROUPS: DiagramGroup[] = ["frontend", "backend", "data", "decision"];
+const SOURCE_BADGE: Record<string, string> = {
+  slack: "bg-[#fce7f3] text-[#9d174d] border-[#f9a8d4]",
+  notion: "bg-[#f3f4f6] text-[#1f2937] border-[#d1d5db]",
+  drive: "bg-[#fef3c7] text-[#854d0e] border-[#fcd34d]",
+  gmail: "bg-[#fee2e2] text-[#991b1b] border-[#fca5a5]",
+  meeting: "bg-[#dbeafe] text-[#1e40af] border-[#93c5fd]",
+  github: "bg-[#e0e7ff] text-[#3730a3] border-[#a5b4fc]",
+  code: "bg-[#dcfce7] text-[#166534] border-[#86efac]",
+};
+
+export type MeetingContextBoardProps = {
+  plan: WhiteboardPlan | null;
+  topic?: string | null;
+  planning?: boolean;
+  plannerMessage?: string | null;
+  contextItems?: ProjectContextItem[];
+};
 
 export function MeetingContextBoard({
-  query,
-  items,
-}: {
-  query: string | null;
-  items: ProjectContextItem[];
-}) {
-  const [plannedDiagram, setPlannedDiagram] = useState<DiagramPlan | null>(null);
-  const [planning, setPlanning] = useState(false);
-  const [plannerError, setPlannerError] = useState<string | null>(null);
-  const lastUsefulPlanRef = useRef<DiagramPlan | null>(null);
-  const visibleTopic = query?.trim() || lastUsefulPlanRef.current?.topic || null;
-
-  useEffect(() => {
-    if (!query || items.length === 0) return;
-
-    const activeQuery = query;
-    const controller = new AbortController();
-    setPlanning(true);
-    setPlannerError(null);
-
-    async function planDiagram() {
-      try {
-        const response = await fetch("/api/diagram/plan", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ topic: query, contextItems: items }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`Diagram planning failed: ${response.status}`);
-        }
-
-        const plan = (await response.json()) as DiagramPlan;
-        const normalized = normalizePlan(plan, activeQuery, items);
-        lastUsefulPlanRef.current = normalized;
-        setPlannedDiagram(normalized);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        const fallback = fallbackDiagramPlan(activeQuery, items);
-        lastUsefulPlanRef.current = fallback;
-        setPlannedDiagram(fallback);
-        setPlannerError(error instanceof Error ? error.message : "Diagram planner failed.");
-      } finally {
-        if (!controller.signal.aborted) setPlanning(false);
-      }
-    }
-
-    void planDiagram();
-
-    return () => controller.abort();
-  }, [items, query]);
-
-  const visiblePlan = plannedDiagram ?? lastUsefulPlanRef.current;
-  const whiteboardElements = useMemo(
-    () => (visiblePlan ? diagramPlanToElements(visiblePlan) : []),
-    [visiblePlan],
-  );
-  const groupedNodes = useMemo(() => groupPlanNodes(visiblePlan), [visiblePlan]);
-  const hasContent = whiteboardElements.length > 0;
+  plan,
+  topic,
+  planning = false,
+  plannerMessage = null,
+  contextItems = [],
+}: MeetingContextBoardProps) {
+  const elements = plan?.elements ?? [];
+  const hasContent = elements.length > 0;
+  const visibleTopic = (topic ?? plan?.topic ?? "").trim();
+  const layoutLabel = plan?.layout ? LAYOUT_LABEL[plan.layout] ?? plan.layout : null;
 
   return (
     <section className="space-y-3">
       <div>
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-ink-900">Live Context</h3>
-          {planning && <span className="text-xs text-ink-400">Planning diagram...</span>}
+          <h3 className="text-sm font-semibold text-ink-900">Live Whiteboard</h3>
+          <div className="flex items-center gap-2 text-xs text-ink-400">
+            {layoutLabel && (
+              <span className="rounded-full border border-ink-200 px-2 py-0.5 text-ink-600">
+                {layoutLabel}
+              </span>
+            )}
+            {planning && <span>Planning…</span>}
+          </div>
         </div>
         <p className="text-sm text-ink-400">
           {visibleTopic
-            ? `Shared understanding board for: ${summarizeTopic(visibleTopic)}`
+            ? `Drawing for: ${summarizeTopic(visibleTopic)}`
             : "Listening for engineering context..."}
         </p>
+        {plan?.rationale && (
+          <p className="mt-1 text-xs italic text-ink-400">Why this layout: {plan.rationale}</p>
+        )}
       </div>
 
-      {plannerError && (
+      {plannerMessage && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">
-          Using deterministic diagram fallback. {plannerError}
+          Planner: {plannerMessage}
         </div>
       )}
 
       {hasContent ? (
-        <>
-          <LiveContextWhiteboard elements={whiteboardElements} />
-          <div className="grid gap-2 md:grid-cols-2">
-            {SIDE_GROUPS.map((group) => {
-              const nodes = groupedNodes[group];
-              if (nodes.length === 0) return null;
-
-              return (
-                <section key={group} className="rounded-lg border border-ink-200 bg-white p-3">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <h4 className="text-xs font-semibold uppercase text-ink-500">
-                      {GROUP_LABEL[group]}
-                    </h4>
-                    <span className="text-xs text-ink-400">{nodes.length}</span>
-                  </div>
-                  <ul className="space-y-2">
-                    {nodes.slice(0, 4).map((node) => (
-                      <li key={node.id}>
-                        <div className="text-sm font-medium text-ink-900">{node.label}</div>
-                        <p className="mt-0.5 line-clamp-2 text-xs text-ink-500">{node.detail}</p>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              );
-            })}
-          </div>
-        </>
+        <LiveContextWhiteboard elements={elements} />
       ) : (
         <div className="rounded-lg border border-dashed border-ink-200 p-8 text-center text-sm text-ink-400">
-          The whiteboard will appear when the model calls project context.
+          {planning
+            ? "Planning the first whiteboard..."
+            : "The whiteboard will appear when the agent has enough context."}
         </div>
       )}
+
+      <SourcesPanel items={contextItems} />
     </section>
   );
 }
 
-function groupPlanNodes(plan: DiagramPlan | null) {
-  const grouped: Record<DiagramGroup, DiagramPlan["nodes"]> = {
-    topic: [],
-    frontend: [],
-    backend: [],
-    data: [],
-    decision: [],
-  };
+function SourcesPanel({ items }: { items: ProjectContextItem[] }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <section className="space-y-2 rounded-lg border border-ink-200 bg-ink-50 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <h4 className="text-xs font-semibold uppercase text-ink-500">
+          Sources used ({items.length})
+        </h4>
+      </div>
+      <ul className="space-y-1.5">
+        {items.slice(0, 8).map((item, idx) => {
+          const key = item.id ?? `${item.source}-${idx}`;
+          const title =
+            item.title?.trim() ||
+            item.code_path ||
+            item.snippet?.slice(0, 80) ||
+            "Untitled";
+          const badgeClass =
+            SOURCE_BADGE[item.source] ?? "bg-white text-ink-600 border-ink-200";
+          const showSnippet =
+            item.snippet && item.title && item.title.trim() !== item.snippet.trim();
+          const href = item.ref_url || item.url;
 
-  for (const node of plan?.nodes ?? []) {
-    grouped[node.group]?.push(node);
-  }
-
-  return grouped;
-}
-
-function normalizePlan(plan: DiagramPlan, topic: string, items: ProjectContextItem[]) {
-  const fallback = fallbackDiagramPlan(topic, items);
-  const nodes = plan.nodes?.length ? plan.nodes : fallback.nodes;
-  const hasTopic = nodes.some((node) => node.id === "topic" && node.group === "topic");
-  const normalizedNodes = hasTopic
-    ? nodes
-    : [
-        {
-          id: "topic",
-          label: plan.topic || topic,
-          detail: "Current discussion topic.",
-          group: "topic" as const,
-        },
-        ...nodes,
-      ];
-
-  return {
-    topic: plan.topic || topic,
-    nodes: normalizedNodes.map((node, index) => ({
-      ...node,
-      id: node.id || `node_${index}`,
-      label: node.label || "Context",
-      detail: node.detail || "Relevant context for the current engineering discussion.",
-      group: node.group || "frontend",
-    })),
-    edges: plan.edges?.length ? plan.edges : fallback.edges,
-  } satisfies DiagramPlan;
+          return (
+            <li key={key} className="rounded-md border border-ink-200 bg-white p-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${badgeClass}`}
+                >
+                  {item.source}
+                </span>
+                {item.score != null && (
+                  <span className="text-xs tabular-nums text-ink-400">
+                    {Math.round(item.score * 100)}%
+                  </span>
+                )}
+                {href ? (
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="min-w-0 truncate text-sm font-medium text-ink-900 hover:underline"
+                  >
+                    {title}
+                  </a>
+                ) : (
+                  <span className="min-w-0 truncate text-sm font-medium text-ink-900">
+                    {title}
+                  </span>
+                )}
+              </div>
+              {showSnippet && (
+                <p className="mt-1 line-clamp-2 text-xs text-ink-500">{item.snippet}</p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 function summarizeTopic(query: string) {

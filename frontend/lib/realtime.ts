@@ -1,3 +1,12 @@
+// Realtime ASR connection. Phase-1 architecture: this is now transcription-
+// only. The model no longer calls tools; all reasoning + retrieval + diagram
+// planning happens server-side behind a debounced turn queue (see
+// backend/routers/whiteboard.py).
+//
+// We keep using `gpt-realtime-2` rather than the dedicated transcription
+// session because the existing token endpoint and SDP exchange flow already
+// works with it, and we may later re-add lightweight voice replies.
+
 export type RealtimeTranscriptEvent =
   | { type: "delta"; text: string }
   | { type: "completed"; text: string };
@@ -24,11 +33,7 @@ export type ConnectRealtimeOptions = {
   stream: MediaStream;
   token: string;
   briefingPrompt: string;
-  projectId: string;
-  fastApiUrl: string;
-  queryContext?: (query: string) => Promise<ProjectContextItem[]>;
   onTranscript: (event: RealtimeTranscriptEvent) => void;
-  onContextItems: (query: string, items: ProjectContextItem[]) => void;
   onError: (error: Error) => void;
 };
 
@@ -61,10 +66,8 @@ export async function connectRealtime(
           audio: {
             input: {
               transcription: {
-                model: "gpt-4o-mini-transcribe",
+                model: "gpt-4o-transcribe",
                 language: "en",
-                prompt:
-                  "Engineering meeting about frontend code, React Flow, repositories, Supabase, FastAPI, and Google Meet.",
               },
               turn_detection: {
                 type: "server_vad",
@@ -74,40 +77,17 @@ export async function connectRealtime(
               },
             },
           },
-          tools: [
-            {
-              type: "function",
-              name: "search_project_context",
-              description:
-                "Search this project's knowledge base for files, decisions, or threads relevant to the engineering topic currently being discussed.",
-              parameters: {
-                type: "object",
-                properties: {
-                  query: {
-                    type: "string",
-                    description:
-                      "A concise search query for the current engineering topic.",
-                  },
-                },
-                required: ["query"],
-              },
-            },
-          ],
-          tool_choice: "auto",
         },
       }),
     );
   });
 
-  dc.addEventListener("message", async (event) => {
+  dc.addEventListener("message", (event) => {
     try {
       const payload = JSON.parse(event.data as string) as {
         type?: string;
         delta?: string;
         transcript?: string;
-        name?: string;
-        arguments?: string;
-        call_id?: string;
         error?: { message?: string; type?: string; code?: string };
       };
 
@@ -126,45 +106,6 @@ export async function connectRealtime(
       if (payload.type === "conversation.item.input_audio_transcription.completed") {
         options.onTranscript({ type: "completed", text: payload.transcript ?? "" });
         return;
-      }
-
-      if (
-        payload.type === "response.function_call_arguments.done" &&
-        payload.name === "search_project_context" &&
-        payload.call_id
-      ) {
-        const args = JSON.parse(payload.arguments ?? "{}") as { query?: string };
-        const query = args.query?.trim();
-        if (!query) return;
-
-        const items = options.queryContext
-          ? await options.queryContext(query)
-          : await fetch(`${options.fastApiUrl}/context/query`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ projectId: options.projectId, query, k: 6 }),
-            })
-              .then((res) => (res.ok ? res.json() : Promise.reject(res.statusText)))
-              .catch((error) => {
-                options.onError(
-                  error instanceof Error ? error : new Error(String(error)),
-                );
-                return [];
-              });
-
-        options.onContextItems(query, items as ProjectContextItem[]);
-
-        dc.send(
-          JSON.stringify({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: payload.call_id,
-              output: JSON.stringify(items),
-            },
-          }),
-        );
-        dc.send(JSON.stringify({ type: "response.create" }));
       }
     } catch (error) {
       options.onError(error instanceof Error ? error : new Error(String(error)));

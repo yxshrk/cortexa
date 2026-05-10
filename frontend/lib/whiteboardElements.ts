@@ -1,10 +1,6 @@
-// Internal whiteboard element abstraction. The planner emits these (or for
-// now, we translate from DiagramPlan), and the Excalidraw renderer converts
-// them via toExcalidrawSkeleton -> convertToExcalidrawElements.
-//
-// Keeping this provider-agnostic means we can later swap the planner's output
-// shape (e.g. line-numbered diff ops as in autopreso) without touching the
-// renderer.
+// Internal whiteboard element abstraction. The backend planner emits these
+// directly; the Excalidraw renderer converts them via toExcalidrawSkeleton ->
+// convertToExcalidrawElements.
 
 export type WBShapeKind = "rect" | "ellipse" | "diamond";
 
@@ -42,6 +38,23 @@ export type WBText = {
 };
 
 export type WhiteboardElement = WBShape | WBArrow | WBText;
+
+export type WhiteboardLayout =
+  | "flow"
+  | "comparison"
+  | "hierarchy"
+  | "timeline"
+  | "kanban"
+  | "cluster"
+  | "matrix"
+  | "freeform";
+
+export type WhiteboardPlan = {
+  topic: string;
+  layout: WhiteboardLayout;
+  rationale?: string;
+  elements: WhiteboardElement[];
+};
 
 type ExcalidrawSkeleton = Record<string, unknown>;
 
@@ -102,11 +115,43 @@ export function toExcalidrawSkeleton(elements: WhiteboardElement[]): ExcalidrawS
       const target = shapeIndex.get(element.to);
       if (!source || !target) continue;
 
+      // Clip the source→target line to each shape's bounding box so the
+      // arrow's visible segment starts at the source border (not its center)
+      // and ends at the target border. Without this, Excalidraw renders
+      // center-to-center and both halves disappear into the shapes.
+      const sourceCenterX = source.x + source.width / 2;
+      const sourceCenterY = source.y + source.height / 2;
+      const targetCenterX = target.x + target.width / 2;
+      const targetCenterY = target.y + target.height / 2;
+
+      const start = rectExitPoint(
+        sourceCenterX,
+        sourceCenterY,
+        source.width,
+        source.height,
+        targetCenterX,
+        targetCenterY,
+        4,
+      );
+      const end = rectExitPoint(
+        targetCenterX,
+        targetCenterY,
+        target.width,
+        target.height,
+        sourceCenterX,
+        sourceCenterY,
+        4,
+      );
+
       skeleton.push({
         type: "arrow",
         id: element.id,
-        x: source.x + source.width / 2,
-        y: source.y + source.height / 2,
+        x: start.x,
+        y: start.y,
+        points: [
+          [0, 0],
+          [end.x - start.x, end.y - start.y],
+        ],
         strokeColor: element.strokeColor ?? "#475569",
         strokeWidth: 1.25,
         roughness: 1,
@@ -127,4 +172,31 @@ export function toExcalidrawSkeleton(elements: WhiteboardElement[]): ExcalidrawS
   }
 
   return skeleton;
+}
+
+// Where does a ray from (cx, cy) toward (towardX, towardY) exit a rectangle
+// of (width, height) centered at (cx, cy)? Treats ellipses/diamonds as their
+// bounding box — close enough for arrow attachment at hackathon quality.
+// `margin` adds a small gap so arrow heads don't touch the shape border.
+function rectExitPoint(
+  cx: number,
+  cy: number,
+  width: number,
+  height: number,
+  towardX: number,
+  towardY: number,
+  margin: number,
+): { x: number; y: number } {
+  const dx = towardX - cx;
+  const dy = towardY - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+
+  const halfW = width / 2 + margin;
+  const halfH = height / 2 + margin;
+
+  const tx = dx === 0 ? Number.POSITIVE_INFINITY : halfW / Math.abs(dx);
+  const ty = dy === 0 ? Number.POSITIVE_INFINITY : halfH / Math.abs(dy);
+  const t = Math.min(tx, ty);
+
+  return { x: cx + dx * t, y: cy + dy * t };
 }

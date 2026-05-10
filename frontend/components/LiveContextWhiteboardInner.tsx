@@ -29,7 +29,7 @@ export default function LiveContextWhiteboardInner({ elements }: LiveContextWhit
   }, [sceneElements]);
 
   return (
-    <div className="h-[34rem] overflow-hidden rounded-lg border border-ink-200 bg-white">
+    <div className="h-[48rem] overflow-hidden rounded-lg border border-ink-200 bg-white">
       <Excalidraw
         initialData={{
           elements: sceneElements,

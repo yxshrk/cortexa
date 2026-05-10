@@ -18,6 +18,36 @@ export default function MeetingNotesPanel({ projectId }: { projectId: string }) 
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  async function createMeeting() {
+    setCreating(true);
+    setError(null);
+    try {
+      const fastApiUrl =
+        process.env.NEXT_PUBLIC_FASTAPI_URL ?? "http://localhost:8000";
+      const res = await fetch(`${fastApiUrl}/meetings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, title: defaultMeetingTitle() }),
+      });
+      if (!res.ok) {
+        throw new Error(`Create meeting failed: ${res.status} ${await res.text()}`);
+      }
+      const created = (await res.json()) as Meeting;
+      // Realtime subscription will refresh the list, but select the new
+      // meeting immediately so the right pane switches to it.
+      setSelectedMeetingId(created.id);
+      setMeetings((current) => {
+        if (current.some((m) => m.id === created.id)) return current;
+        return [created, ...current];
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create meeting.");
+    } finally {
+      setCreating(false);
+    }
+  }
 
   const selectedMeeting = useMemo(
     () => meetings.find((meeting) => meeting.id === selectedMeetingId) ?? null,
@@ -91,15 +121,12 @@ export default function MeetingNotesPanel({ projectId }: { projectId: string }) 
             Meetings
           </h2>
           <button
-            onClick={() => {
-              setError(
-                "Meeting rows are created by backend/setup for now. Ask Jin/Yash to seed a live meeting, then it will appear here.",
-              );
-            }}
-            className="text-xs rounded-md bg-ink-900 text-white px-2 py-1 hover:opacity-90"
+            onClick={createMeeting}
+            disabled={creating}
+            className="text-xs rounded-md bg-ink-900 text-white px-2 py-1 hover:opacity-90 disabled:opacity-50"
             title="Start a new meeting and launch the voice agent"
           >
-            + New
+            {creating ? "Creating…" : "+ New"}
           </button>
         </div>
         {loading ? (
@@ -145,7 +172,7 @@ export default function MeetingNotesPanel({ projectId }: { projectId: string }) 
       </aside>
 
       {/* Column 2 — voice agent / notes */}
-      <section className="col-span-6 rounded-xl border border-ink-200 bg-white p-5">
+      <section className="col-span-9 rounded-xl border border-ink-200 bg-white p-5">
         <h2 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-3 px-1">
           Voice agent · structured notes
         </h2>
@@ -164,17 +191,19 @@ export default function MeetingNotesPanel({ projectId }: { projectId: string }) 
         )}
       </section>
 
-      {/* Column 3 — live context / chunks */}
-      <aside className="col-span-3 rounded-xl border border-ink-200 bg-white p-3">
-        <h2 className="text-xs font-semibold uppercase text-ink-400 tracking-wide mb-2 px-1">
-          Live context
-        </h2>
-        <div className="text-xs text-ink-400 px-1">
-          As the agent transcribes, relevant chunks from connectors appear here.
-        </div>
-      </aside>
     </div>
   );
+}
+
+function defaultMeetingTitle() {
+  const now = new Date();
+  const stamp = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(now);
+  return `Meeting · ${stamp}`;
 }
 
 function formatMeetingTime(value: string | null) {
