@@ -111,6 +111,7 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
         .from("generation_runs")
         .select("*")
         .eq("project_id", projectId)
+        .eq("kind", "plan")
         .order("created_at", { ascending: false })
         .limit(20),
     ]).then(([d, i, r]) => {
@@ -144,7 +145,13 @@ export default function KnowledgeDocTab({ projectId }: { projectId: string }) {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "generation_runs", filter: `project_id=eq.${projectId}` },
-        (p) => setRuns((prev) => mergeRow(prev, p)),
+        (p) => {
+          // Realtime can't filter by `kind`; do it client-side so ingest runs
+          // never end up in the plan-generation progress card.
+          const row = (p.new ?? p.old) as { kind?: string } | undefined;
+          if (row && row.kind && row.kind !== "plan") return;
+          setRuns((prev) => mergeRow(prev, p));
+        },
       )
       .subscribe();
 

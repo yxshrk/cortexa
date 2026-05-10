@@ -125,25 +125,21 @@ def _item_dedup_key(it: Any) -> tuple[str, str]:
 
 @router.post(
     "/hyperspell",
-    response_model=IngestResponse,
+    response_model=IngestStartResponse,
     dependencies=[Depends(require_demo_token)],
 )
 async def ingest_hyperspell(
     body: IngestBody,
+    bg: BackgroundTasks,
     sb: Client = Depends(get_supabase),
-) -> IngestResponse:
-    """Mirror Hyperspell PER SOURCE into project_context.
+) -> IngestStartResponse:
+    """Kick off a Hyperspell ingest. Returns ``runId`` immediately; the pipeline
+    runs in a background task and emits live phase events onto
+    ``generation_runs.progress`` (kind='ingest') so the frontend can render a
+    real-time progress card via Supabase realtime.
 
-    For each supported source we run two pulls in parallel:
-      * ``hyperspell.list_and_fetch`` — durable mirror (memories.list + get).
-      * ``hyperspell.search``        — small ranked supplement so freshly-relevant
-                                       items still re-embed even if the mirror
-                                       page didn't reach them.
-
-    Items are deduped by (source, external_id|content_hash) within the run, then
-    embedded in one batched call and UPSERTed into ``project_context``. Idempotent
-    across runs via the unique indexes on
-    ``(project_id, source, external_id)`` and ``(project_id, source, content_hash)``.
+    Idempotent via the partial unique index ``generation_runs_one_active_uniq``
+    on ``(project_id, week_start, kind)`` for ``status in ('queued','running')``.
     """
     project = supabase_writer.get_project(sb, body.projectId)
     if not project:
@@ -153,9 +149,117 @@ async def ingest_hyperspell(
     if not project.get("hyperspell_user_id"):
         supabase_writer.set_hyperspell_user_id(sb, body.projectId, user_id)
 
+    started_at = _now_iso()
+    today = datetime.now(timezone.utc).date()
+
+    try:
+        run = (
+            sb.table("generation_runs")
+            .insert(
+                {
+                    "project_id": body.projectId,
+                    "kind": "ingest",
+                    "week_start": today.isoformat(),
+                    "idempotency_key": str(uuid4()),
+                    "status": "running",
+                    "started_at": started_at,
+                }
+            )
+            .execute()
+        )
+        run_row = (run.data or [{}])[0]
+        run_id = run_row.get("id")
+        if not run_id:
+            raise HTTPException(500, "generation_runs insert returned no id")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        if _is_unique_violation(e):
+            existing = (
+                sb.table("generation_runs")
+                .select("id,status")
+                .eq("project_id", body.projectId)
+                .eq("kind", "ingest")
+                .in_("status", ["queued", "running"])
+                .limit(1)
+                .execute()
+            )
+            row = (existing.data or [{}])[0]
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "runId": row.get("id"),
+                    "status": row.get("status") or "running",
+                    "message": "another ingest is already in flight for this project",
+                },
+            )
+        log.exception("generation_runs insert (kind=ingest) failed")
+        raise HTTPException(500, f"generation_runs insert failed: {e}")
+
+    bg.add_task(
+        _run_ingest_pipeline_safe,
+        project_id=body.projectId,
+        run_id=str(run_id),
+        hyperspell_user_id=user_id,
+    )
+
+    return IngestStartResponse(runId=str(run_id), status="running", started_at=started_at)
+
+
+# ─── pipeline (background) ────────────────────────────────────────────────────
+async def _run_ingest_pipeline_safe(
+    *,
+    project_id: str,
+    run_id: str,
+    hyperspell_user_id: str,
+) -> None:
+    """Top-level wrapper that always finalizes the run row, even on crash."""
+    sb = get_supabase()
+
+    async def emit(event: dict[str, Any]) -> None:
+        await progress.append_event_async(sb, run_id, progress.safe_event(event))
+
+    try:
+        await emit(
+            {
+                "phase": "load",
+                "kind": "start",
+                "message": "Ingest starting",
+                "percent": PCT_LOAD_START,
+            }
+        )
+        await _run_ingest_pipeline(
+            sb=sb,
+            project_id=project_id,
+            run_id=run_id,
+            hyperspell_user_id=hyperspell_user_id,
+            emit=emit,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("ingest pipeline failed")
+        try:
+            await emit(
+                {
+                    "phase": "finalize",
+                    "kind": "error",
+                    "message": f"Ingest failed: {e}",
+                }
+            )
+        finally:
+            await asyncio.to_thread(_mark_run_error, sb, run_id, str(e))
+
+
+async def _run_ingest_pipeline(
+    *,
+    sb: Client,
+    project_id: str,
+    run_id: str,
+    hyperspell_user_id: str,
+    emit,
+) -> None:
     async def _mirror(db_src: str) -> list[Any]:
         return await hyperspell.list_and_fetch(
-            hyperspell_user_id=user_id,
+            hyperspell_user_id=hyperspell_user_id,
             db_source=db_src,
             max_items=PER_SOURCE_MIRROR_CAP,
         )
@@ -164,7 +268,7 @@ async def ingest_hyperspell(
         if PER_SOURCE_RANKED_SUPPLEMENT_K <= 0:
             return []
         return await hyperspell.search(
-            hyperspell_user_id=user_id,
+            hyperspell_user_id=hyperspell_user_id,
             query=RANKED_SUPPLEMENT_QUERY,
             db_sources=[db_src],
             k=PER_SOURCE_RANKED_SUPPLEMENT_K,
@@ -172,27 +276,19 @@ async def ingest_hyperspell(
 
     async def _pull(db_src: str) -> tuple[str, list[Any], str | None, dict[str, int]]:
         try:
-            mirror_task = asyncio.create_task(_mirror(db_src))
-            supp_task = asyncio.create_task(_supplement(db_src))
             mirror_items, supp_items = await asyncio.gather(
-                mirror_task, supp_task, return_exceptions=False
+                _mirror(db_src), _supplement(db_src), return_exceptions=False
             )
         except RuntimeError as e:
             return db_src, [], f"sdk/key: {e}", {
-                "mirror_count": 0,
-                "supplement_count": 0,
-                "deduped_within_source": 0,
+                "mirror_count": 0, "supplement_count": 0, "deduped_within_source": 0,
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log.warning("ingest pull failed for %s: %s", db_src, e)
             return db_src, [], f"{type(e).__name__}: {e}", {
-                "mirror_count": 0,
-                "supplement_count": 0,
-                "deduped_within_source": 0,
+                "mirror_count": 0, "supplement_count": 0, "deduped_within_source": 0,
             }
 
-        # Merge with the mirror as the canonical body; supplement only adds items
-        # the mirror page didn't reach.
         seen: set[tuple[str, str]] = set()
         merged: list[Any] = []
         for it in mirror_items + supp_items:
@@ -207,27 +303,60 @@ async def ingest_hyperspell(
             "deduped_within_source": (len(mirror_items) + len(supp_items)) - len(merged),
         }
 
-    pulls = await asyncio.gather(*[_pull(s) for s in DB_SOURCES])
-
+    # ── load (parallel pull, emit per-source as they finish) ────────────────
+    pull_tasks = {asyncio.create_task(_pull(s)): s for s in DB_SOURCES}
+    completed = 0
+    total_sources = len(DB_SOURCES)
     all_items: list[Any] = []
     by_source: dict[str, int] = {}
     errors: dict[str, str] = {}
     source_pull_stats: dict[str, dict[str, int]] = {}
-    for db_src, items, err, pull_stats in pulls:
+
+    pull_span = max(1, PCT_LOAD_END - PCT_LOAD_START)
+    for fut in asyncio.as_completed(list(pull_tasks.keys())):
+        db_src, items, err, pull_stats = await fut
+        completed += 1
         source_pull_stats[db_src] = pull_stats
         if err:
             errors[db_src] = err
         if items:
             by_source[db_src] = len(items)
             all_items.extend(items)
+        pct = PCT_LOAD_START + int(pull_span * (completed / total_sources))
+        await emit(
+            {
+                "phase": "load",
+                "kind": "progress",
+                "message": (
+                    f"Pulled {db_src}: {len(items)} item{'' if len(items) == 1 else 's'}"
+                    + (f" — {err}" if err else "")
+                ),
+                "percent": pct,
+                "extra": {
+                    "source": db_src,
+                    "items": len(items),
+                    "completed_sources": completed,
+                    "total_sources": total_sources,
+                    "running_total": len(all_items),
+                },
+            }
+        )
+
+    await emit(
+        {
+            "phase": "load",
+            "kind": "end",
+            "message": f"Loaded {len(all_items)} document{'' if len(all_items) == 1 else 's'} across {len(by_source)} source{'' if len(by_source) == 1 else 's'}",
+            "percent": PCT_LOAD_END,
+            "extra": {"documents": len(all_items), "by_source": by_source, "errors": errors},
+        }
+    )
 
     if not all_items:
-        return IngestResponse(
-            upserted=0,
-            inserted=0,
-            updated=0,
-            by_source={},
-            errors=errors,
+        await asyncio.to_thread(
+            _finish_run,
+            sb,
+            run_id,
             metrics={
                 "documents_total": 0,
                 "sources_attempted": len(DB_SOURCES),
@@ -235,22 +364,70 @@ async def ingest_hyperspell(
                 "by_source_pull": source_pull_stats,
             },
         )
+        await emit(
+            {
+                "phase": "finalize",
+                "kind": "end",
+                "message": "Nothing to embed — connect a source and try again.",
+                "percent": PCT_DONE,
+                "extra": {"errors": errors},
+            }
+        )
+        return
 
-    # Embed in one batched call using chunk-aware representations for long docs.
+    # ── embed (single batched call; chunk-aware representations) ────────────
+    await emit(
+        {
+            "phase": "embed",
+            "kind": "start",
+            "message": f"Chunking + embedding {len(all_items)} document{'' if len(all_items) == 1 else 's'}",
+            "percent": PCT_EMBED_START,
+        }
+    )
     texts = [hyperspell.build_embedding_text(it.full_text) for it in all_items]
     try:
         vectors = await embeddings.embed_many(texts)
-    except Exception as e:
-        log.exception("embedding failed")
-        raise HTTPException(503, f"embedding failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        await emit({"phase": "embed", "kind": "error", "message": f"Embedding failed: {e}"})
+        raise
 
-    rows: list[dict[str, Any]] = []
+    # Build chunking stats while the embedding response is still warm.
     row_text_stats: list[dict[str, Any]] = []
-    for it, vec, emb_text in zip(all_items, vectors, texts):
+    for it, emb_text in zip(all_items, texts):
+        stats = hyperspell.chunking_stats(it.full_text, emb_text)
+        stats["source"] = it.source
+        stats["snippet_chars"] = len((it.snippet or "")[:500])
+        row_text_stats.append(stats)
+
+    chunks_total = sum(int(r["chunk_count_total"]) for r in row_text_stats)
+    chunks_selected = sum(int(r["chunk_count_selected"]) for r in row_text_stats)
+    chunks_selected_ratio = round(chunks_selected / max(1, chunks_total), 3)
+
+    await emit(
+        {
+            "phase": "embed",
+            "kind": "end",
+            "message": (
+                f"Embedded {len(all_items)} doc{'' if len(all_items) == 1 else 's'} · "
+                f"{chunks_selected}/{chunks_total} chunks selected ({int(chunks_selected_ratio * 100)}%)"
+            ),
+            "percent": PCT_EMBED_END,
+            "extra": {
+                "documents": len(all_items),
+                "chunks_total": chunks_total,
+                "chunks_selected_total": chunks_selected,
+                "chunks_selected_ratio": chunks_selected_ratio,
+            },
+        }
+    )
+
+    # ── upsert ───────────────────────────────────────────────────────────────
+    rows: list[dict[str, Any]] = []
+    for it, vec in zip(all_items, vectors):
         content_hash = hashlib.sha256(it.full_text.encode("utf-8")).hexdigest()
         rows.append(
             {
-                "project_id": body.projectId,
+                "project_id": project_id,
                 "source": it.source,
                 "external_id": it.external_id,
                 "title": it.title,
@@ -264,23 +441,63 @@ async def ingest_hyperspell(
                 "embedding": vec,
             }
         )
-        stats = hyperspell.chunking_stats(it.full_text, emb_text)
-        stats["source"] = it.source
-        stats["snippet_chars"] = len((it.snippet or "")[:500])
-        row_text_stats.append(stats)
 
-    counts = supabase_writer.upsert_project_context(sb, rows)
-    metrics = _build_ingest_metrics(row_text_stats, source_pull_stats, errors)
-
-    return IngestResponse(
-        upserted=counts["inserted"] + counts["updated"],
-        inserted=counts["inserted"],
-        updated=counts["updated"],
-        by_source=by_source,
-        errors=errors,
-        write_errors=counts["errors"],
-        metrics=metrics,
+    await emit(
+        {
+            "phase": "upsert",
+            "kind": "start",
+            "message": f"Writing {len(rows)} row{'' if len(rows) == 1 else 's'} to project_context",
+            "percent": PCT_EMBED_END,
+        }
     )
+    counts = await asyncio.to_thread(supabase_writer.upsert_project_context, sb, rows)
+    await emit(
+        {
+            "phase": "upsert",
+            "kind": "end",
+            "message": (
+                f"Wrote {counts['inserted']} new + {counts['updated']} updated"
+                + (f" · {counts['errors']} errors" if counts.get("errors") else "")
+            ),
+            "percent": PCT_UPSERT_END,
+            "extra": counts,
+        }
+    )
+
+    # ── finalize ─────────────────────────────────────────────────────────────
+    metrics = _build_ingest_metrics(row_text_stats, source_pull_stats, errors)
+    await asyncio.to_thread(_finish_run, sb, run_id, metrics=metrics)
+    await emit(
+        {
+            "phase": "finalize",
+            "kind": "end",
+            "message": (
+                f"Done. {counts['inserted'] + counts['updated']} synced "
+                f"({counts['inserted']} new, {counts['updated']} updated)"
+            ),
+            "percent": PCT_DONE,
+            "extra": {
+                "by_source": by_source,
+                "metrics": metrics,
+                "counts": counts,
+            },
+        }
+    )
+
+
+def _finish_run(sb: Client, run_id: str, *, metrics: dict[str, Any]) -> None:
+    sb.table("generation_runs").update(
+        {"status": "ready", "finished_at": _now_iso()}
+    ).eq("id", run_id).execute()
+
+
+def _mark_run_error(sb: Client, run_id: str, msg: str) -> None:
+    try:
+        sb.table("generation_runs").update(
+            {"status": "error", "error": msg[:1000], "finished_at": _now_iso()}
+        ).eq("id", run_id).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to mark generation_runs.error: %s", e)
 
 
 def _build_ingest_metrics(

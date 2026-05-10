@@ -45,6 +45,34 @@ type IngestResult =
   | { kind: "ok"; upserted: number; inserted: number; updated: number; sources: Record<string, number>; sourceErrors: Record<string, string>; writeErrors: number; metrics?: IngestMetrics; at: number }
   | { kind: "error"; status?: number; message: string; at: number };
 
+type IngestProgressEvent = {
+  ts?: string;
+  phase?: "load" | "embed" | "upsert" | "finalize" | string;
+  kind?: "start" | "progress" | "end" | "info" | "reasoning" | "error";
+  message?: string;
+  percent?: number | null;
+  extra?: Record<string, unknown>;
+};
+
+type IngestRun = {
+  id: string;
+  project_id: string;
+  kind?: "plan" | "ingest" | string;
+  status: "queued" | "running" | "ready" | "error";
+  error: string | null;
+  progress: IngestProgressEvent[] | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+};
+
+const INGEST_PHASE_LABEL: Record<string, string> = {
+  load: "📥 Pulling from Hyperspell",
+  embed: "🧬 Chunking + embedding",
+  upsert: "💾 Writing to project_context",
+  finalize: "✅ Finalizing",
+};
+
 export default function ConnectorsTab({ projectId }: { projectId: string }) {
   const [statuses, setStatuses] = useState<Record<string, ConnStatus> | null>(null);
   const [docs, setDocs] = useState<ProjectContext[]>([]);
@@ -52,19 +80,29 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [ingestResult, setIngestResult] = useState<IngestResult>({ kind: "idle" });
+  const [ingestRuns, setIngestRuns] = useState<IngestRun[]>([]);
 
-  // Initial load + realtime subscription on project_context
+  // Initial load + realtime subscription on project_context + ingest runs
   useEffect(() => {
     setLoading(true);
-    supabase
-      .from("project_context")
-      .select("*")
-      .eq("project_id", projectId)
-      .order("ts", { ascending: false })
-      .then(({ data }) => {
-        setDocs((data ?? []) as ProjectContext[]);
-        setLoading(false);
-      });
+    void Promise.all([
+      supabase
+        .from("project_context")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("ts", { ascending: false }),
+      supabase
+        .from("generation_runs")
+        .select("*")
+        .eq("project_id", projectId)
+        .eq("kind", "ingest")
+        .order("created_at", { ascending: false })
+        .limit(10),
+    ]).then(([d, r]) => {
+      setDocs((d.data ?? []) as ProjectContext[]);
+      setIngestRuns((r.data ?? []) as IngestRun[]);
+      setLoading(false);
+    });
 
     const channel = supabase
       .channel(`pc:${projectId}`)
@@ -80,6 +118,16 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
               return prev.filter((d) => d.id !== (p.old as ProjectContext).id);
             return prev;
           });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "generation_runs", filter: `project_id=eq.${projectId}` },
+        (p) => {
+          // Realtime can't filter on `kind`; do it client-side.
+          const row = (p.new ?? p.old) as IngestRun | undefined;
+          if (!row || row.kind !== "ingest") return;
+          setIngestRuns((prev) => mergeIngestRow(prev, p));
         },
       )
       .subscribe();
@@ -115,10 +163,75 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
     () => buildChunkPreview(selectedDoc?.full_text ?? null),
     [selectedDoc?.id, selectedDoc?.full_text],
   );
-  const liveChunkRatio =
-    ingestResult.kind === "ok"
-      ? ingestResult.metrics?.chunks_selected_ratio ?? null
-      : null;
+
+  // Active ingest run (if any) + last completed for fallback metrics.
+  const activeIngestRun = useMemo(
+    () => ingestRuns.find((r) => r.status === "running" || r.status === "queued") ?? null,
+    [ingestRuns],
+  );
+  const lastReadyIngestRun = useMemo(
+    () => ingestRuns.find((r) => r.status === "ready") ?? null,
+    [ingestRuns],
+  );
+  // Drive the gradient bar's ratio off realtime progress events. Falls back to
+  // the last completed run so the bar stays informative between syncs.
+  const liveChunkRatio = useMemo<number | null>(() => {
+    const events =
+      activeIngestRun?.progress ?? lastReadyIngestRun?.progress ?? null;
+    if (!events) return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const r = events[i]?.extra?.["chunks_selected_ratio"];
+      if (typeof r === "number") return r;
+    }
+    return null;
+  }, [activeIngestRun, lastReadyIngestRun]);
+
+  // While a run is active, push the latest phase percent into the bar so it
+  // animates 0→100 instead of waiting for embed coverage at the end.
+  const livePhasePercent = useMemo<number | null>(() => {
+    if (!activeIngestRun) return null;
+    const events = activeIngestRun.progress ?? [];
+    for (let i = events.length - 1; i >= 0; i--) {
+      const p = events[i]?.percent;
+      if (typeof p === "number") return Math.max(0, Math.min(100, p));
+    }
+    return null;
+  }, [activeIngestRun]);
+  const liveLatestEvent = useMemo<IngestProgressEvent | null>(() => {
+    const events = activeIngestRun?.progress ?? null;
+    return events && events.length > 0 ? events[events.length - 1] : null;
+  }, [activeIngestRun]);
+
+  // Mirror run lifecycle into the banner state so the user sees the same
+  // success/error shape regardless of whether they triggered the run from
+  // this tab or from /connect/return.
+  useEffect(() => {
+    if (activeIngestRun) {
+      setIngestResult((prev) => (prev.kind === "running" ? prev : { kind: "running" }));
+      return;
+    }
+    if (!lastReadyIngestRun) return;
+    setIngestResult((prev) => {
+      if (prev.kind === "ok" && prev.at >= +new Date(lastReadyIngestRun.finished_at ?? 0)) return prev;
+      const events = lastReadyIngestRun.progress ?? [];
+      const final = [...events].reverse().find((e) => e.phase === "finalize" && e.kind === "end");
+      const extra = (final?.extra ?? {}) as Record<string, unknown>;
+      const counts = (extra["counts"] ?? {}) as { inserted?: number; updated?: number; errors?: number };
+      const bySource = (extra["by_source"] ?? {}) as Record<string, number>;
+      const metrics = (extra["metrics"] ?? undefined) as IngestMetrics | undefined;
+      return {
+        kind: "ok",
+        upserted: (counts.inserted ?? 0) + (counts.updated ?? 0),
+        inserted: counts.inserted ?? 0,
+        updated: counts.updated ?? 0,
+        sources: bySource,
+        sourceErrors: {},
+        writeErrors: counts.errors ?? 0,
+        metrics,
+        at: +new Date(lastReadyIngestRun.finished_at ?? Date.now()),
+      };
+    });
+  }, [activeIngestRun, lastReadyIngestRun]);
 
   // Track in-flight ingest so the popup-watcher and the "just_connected"
   // bootstrap path never double-fire.
@@ -136,6 +249,11 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         headers: authHeaders(),
         body: JSON.stringify({ projectId }),
       });
+      if (r.status === 409) {
+        // Another ingest is already running — that's fine, realtime will pick it up.
+        setIngestResult({ kind: "running" });
+        return;
+      }
       if (!r.ok) {
         const text = await r.text().catch(() => "");
         setIngestResult({
@@ -146,18 +264,10 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         });
         return;
       }
-      const body = await r.json();
-      setIngestResult({
-        kind: "ok",
-        upserted: body.upserted ?? 0,
-        inserted: body.inserted ?? 0,
-        updated: body.updated ?? 0,
-        sources: body.by_source ?? {},
-        sourceErrors: body.errors ?? {},
-        writeErrors: body.write_errors ?? 0,
-        metrics: body.metrics ?? undefined,
-        at: Date.now(),
-      });
+      // Async backend: response is { runId, status, started_at }. Final metrics
+      // arrive on generation_runs.progress via realtime; the live progress card
+      // reads them from there.
+      setIngestResult({ kind: "running" });
     } catch (e) {
       setIngestResult({
         kind: "error",
@@ -488,27 +598,13 @@ export default function ConnectorsTab({ projectId }: { projectId: string }) {
         )}
         {selectedDoc && (
           <div className="space-y-3">
-            <section className="relative overflow-hidden rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-violet-50 to-cyan-50 p-3 shadow-sm">
-              <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-indigo-300/40 blur-2xl" />
-              <div className="pointer-events-none absolute -bottom-10 -left-8 h-24 w-24 rounded-full bg-cyan-300/40 blur-2xl" />
-              <div className="relative z-10">
-                <div className="mb-2 flex items-center justify-end">
-                  <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] text-indigo-700 shadow-sm">
-                    {chunkPreview.length} preview chunks
-                  </span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-white/80">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-violet-500 to-indigo-500 transition-all duration-700"
-                    style={{ width: `${Math.round((liveChunkRatio ?? 0.5) * 100)}%` }}
-                  />
-                </div>
-                <div className="mt-1 text-[11px] text-indigo-700/90">
-                  Embed coverage {Math.round((liveChunkRatio ?? 0.5) * 100)}%
-                  {liveChunkRatio === null && " (preview estimate)"}
-                </div>
-              </div>
-            </section>
+            <ChunkingBar
+              activeRun={activeIngestRun}
+              latestEvent={liveLatestEvent}
+              livePhasePercent={livePhasePercent}
+              chunkRatio={liveChunkRatio}
+              previewChunks={chunkPreview.length}
+            />
             <div>
               <div className="text-xs text-ink-400">Title</div>
               <div className="font-medium">{selectedDoc.title ?? "(untitled)"}</div>
@@ -686,6 +782,100 @@ function EmptyDocs({ onIngest, source }: { onIngest: () => void; source: Connect
       </div>
     </div>
   );
+}
+
+function ChunkingBar({
+  activeRun,
+  latestEvent,
+  livePhasePercent,
+  chunkRatio,
+  previewChunks,
+}: {
+  activeRun: IngestRun | null;
+  latestEvent: IngestProgressEvent | null;
+  livePhasePercent: number | null;
+  chunkRatio: number | null;
+  previewChunks: number;
+}) {
+  const isLive = !!activeRun;
+  // While a run is active, fill from phase percent. After it ends, settle on
+  // embed coverage ratio. If there's no run history at all, render a quiet
+  // 0% bar with no fake number.
+  const fillRatio = isLive
+    ? livePhasePercent !== null
+      ? livePhasePercent / 100
+      : 0
+    : chunkRatio;
+  const widthPct = fillRatio === null ? 0 : Math.round(fillRatio * 100);
+
+  const phaseLabel = (() => {
+    if (!isLive) return null;
+    const phase = latestEvent?.phase ?? "load";
+    return INGEST_PHASE_LABEL[phase] ?? phase;
+  })();
+
+  return (
+    <section className="relative overflow-hidden rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-violet-50 to-cyan-50 p-3 shadow-sm">
+      <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-indigo-300/40 blur-2xl" />
+      <div className="pointer-events-none absolute -bottom-10 -left-8 h-24 w-24 rounded-full bg-cyan-300/40 blur-2xl" />
+      <div className="relative z-10">
+        <div className="mb-2 flex items-center justify-end gap-2">
+          {isLive && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 shadow-sm">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              live
+            </span>
+          )}
+          <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] text-indigo-700 shadow-sm">
+            {previewChunks} preview chunks
+          </span>
+        </div>
+        <div className="h-2 overflow-hidden rounded-full bg-white/80">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-violet-500 to-indigo-500 transition-all duration-700"
+            style={{ width: `${widthPct}%` }}
+          />
+        </div>
+        <div className="mt-1 text-[11px] text-indigo-700/90 truncate">
+          {isLive ? (
+            <>
+              {phaseLabel}
+              {latestEvent?.message && (
+                <span className="text-indigo-700/70"> · {latestEvent.message}</span>
+              )}
+              <span className="ml-1 tabular-nums">{widthPct}%</span>
+            </>
+          ) : chunkRatio === null ? (
+            <span className="text-indigo-700/60">Sync to compute embed coverage.</span>
+          ) : (
+            <>Embed coverage {widthPct}%</>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function mergeIngestRow(
+  prev: IngestRun[],
+  payload: { eventType: string; new?: unknown; old?: unknown },
+): IngestRun[] {
+  if (payload.eventType === "INSERT") {
+    const row = payload.new as IngestRun;
+    if (!row || prev.some((p) => p.id === row.id)) return prev;
+    return [row, ...prev];
+  }
+  if (payload.eventType === "UPDATE") {
+    const row = payload.new as IngestRun;
+    if (!row) return prev;
+    return prev.map((p) => (p.id === row.id ? row : p));
+  }
+  if (payload.eventType === "DELETE") {
+    const row = payload.old as IngestRun;
+    if (!row) return prev;
+    return prev.filter((p) => p.id !== row.id);
+  }
+  return prev;
 }
 
 function buildChunkPreview(text: string | null): Array<{ text: string; chars: number }> {
