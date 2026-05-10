@@ -20,7 +20,7 @@ router = APIRouter(prefix="/rt", tags=["realtime"])
 log = logging.getLogger(__name__)
 
 OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime/client_secrets"
-DEFAULT_MODEL = "gpt-realtime"
+DEFAULT_MODEL = "gpt-realtime-2"
 
 
 class RtTokenResponse(BaseModel):

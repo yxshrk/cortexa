@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch *)",
+      "Bash(gh pr *)",
+      "Bash(gh api *)",
+      "Bash(pnpm add *)",
+      "Bash(npx tsc *)",
+      "Bash(pnpm remove *)",
+      "Bash(timeout 90 pnpm next build)",
+      "Bash(pnpm next *)"
+    ]
+  }
+}

@@ -9,7 +9,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import actions, connect, context, ingest, meetings, memories, plan, realtime, search
+from routers import actions, connect, context, ingest, meetings, memories, plan, realtime, search, whiteboard
 from settings import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -35,6 +35,7 @@ app.include_router(memories.router)
 app.include_router(plan.router)
 app.include_router(realtime.router)
 app.include_router(search.router)
+app.include_router(whiteboard.router)
 
 
 @app.get("/health")
